@@ -1,0 +1,9 @@
+pipecat-ai[deepgram,openai,cartesia,silero,websocket]==1.12.0
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+supabase==2.32.0
+python-dotenv==1.2.4
+cryptography==50.0.2
+# IANA time zones for zoneinfo; slim images and Windows ship none.
+tzdata==2026.5
