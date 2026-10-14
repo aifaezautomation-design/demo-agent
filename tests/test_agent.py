@@ -163,6 +163,7 @@ def test_services_construct_with_configured_settings():
     assert llm._settings.model == "gpt-4o-mini" and llm._settings.temperature == 0.2
     assert stt._settings.model == "nova-3-general" and stt._settings.smart_format is True
     assert tts._settings.voice == config.CARTESIA_VOICE_ID
+    assert tts._settings.generation_config.volume == config.CARTESIA_VOLUME == 1.4
 
 
 @pytest.fixture

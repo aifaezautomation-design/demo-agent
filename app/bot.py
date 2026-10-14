@@ -24,7 +24,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.runner.types import TelnyxCallData
 from pipecat.serializers.telnyx import TelnyxFrameSerializer
-from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.cartesia.tts import CartesiaTTSService, GenerationConfig
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.tts_service import TextAggregationMode
@@ -68,7 +68,10 @@ def build_services() -> tuple[DeepgramSTTService, OpenAILLMService, CartesiaTTSS
     )
     tts = CartesiaTTSService(
         api_key=config.CARTESIA_API_KEY,
-        settings=CartesiaTTSService.Settings(voice=config.CARTESIA_VOICE_ID),
+        settings=CartesiaTTSService.Settings(
+            voice=config.CARTESIA_VOICE_ID,
+            generation_config=GenerationConfig(volume=config.CARTESIA_VOLUME),
+        ),
         text_aggregation_mode=TextAggregationMode.TOKEN if config.CARTESIA_STREAM_TOKENS else TextAggregationMode.SENTENCE,
         max_buffer_delay_ms=config.CARTESIA_MAX_BUFFER_MS,
     )

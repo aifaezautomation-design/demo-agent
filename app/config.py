@@ -53,3 +53,7 @@ _ep = os.getenv("DEEPGRAM_ENDPOINTING_MS", "")
 DEEPGRAM_ENDPOINTING_MS = int(_ep) if _ep else None
 # Silence before voice-activity detection ends a turn (seconds); Smart Turn then confirms.
 VAD_STOP_SECS = float(os.getenv("VAD_STOP_SECS", "0.2"))
+
+# Cartesia volume multiplier (0.5-2.0, 1.0 = normal). The voice already peaks near full scale,
+# so above ~1.5 speech starts to clip and sound distorted: 1.25 -> 0.1%, 1.5 -> 0.8%, 2.0 -> 3.6%.
+CARTESIA_VOLUME = min(max(float(os.getenv("CARTESIA_VOLUME", "1.4")), 0.5), 2.0)
