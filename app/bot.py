@@ -8,13 +8,15 @@ Audio stays at 8 kHz end to end to match the phone network and skip resampling.
 
 import asyncio
 import time
+import uuid
 
 from fastapi import WebSocket
 from loguru import logger
 from openai import AsyncOpenAI
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import EndWorkerFrame, TTSSpeakFrame
+from pipecat.frames.frames import EndWorkerFrame, LLMFullResponseStartFrame, LLMTextFrame, TTSSpeakFrame
+from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -39,6 +41,22 @@ from app.tools import CallSession
 
 PHONE_SAMPLE_RATE = 8000
 _openai = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+
+
+class _SpokeTracker(FrameProcessor):
+    """Remembers whether the LLM already produced speech text in its current response."""
+
+    def __init__(self):
+        super().__init__()
+        self.spoke = False
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, LLMFullResponseStartFrame):
+            self.spoke = False
+        elif isinstance(frame, LLMTextFrame) and frame.text.strip():
+            self.spoke = True
+        await self.push_frame(frame, direction)
 
 
 def _greeting(tenant: Tenant) -> str:
@@ -112,11 +130,17 @@ async def run_call(
     call_control_id: str | None,
     call_sid: str | None,
     sample_rate: int,
+    rtvi: bool = False,
 ) -> None:
     """The call itself, independent of how audio arrives (phone or browser test)."""
     started = time.monotonic()
-    call_id = await db.create_call_log(tenant.id, caller_phone or "unknown", call_control_id, call_sid)
-    session = CallSession(tenant, call_id, caller_phone)
+    # The id is chosen here and the row inserted in the background: waiting on the database
+    # before building the pipeline used to delay the greeting by about 0.8 s.
+    call_id = str(uuid.uuid4())
+    call_log_ready = asyncio.ensure_future(
+        db.create_call_log(tenant.id, caller_phone or "unknown", call_control_id, call_sid, call_id=call_id)
+    )
+    session = CallSession(tenant, call_id, caller_phone, call_log_ready)
     transcript: list[dict] = []
     log = logger.bind(call_id=call_id, client_id=tenant.id)
 
@@ -137,12 +161,14 @@ async def run_call(
         ),
     )
 
+    spoke = _SpokeTracker()
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
             aggregators.user(),
             llm,
+            spoke,
             tts,
             transport.output(),
             aggregators.assistant(),
@@ -157,7 +183,28 @@ async def run_call(
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=60,
+        enable_rtvi=rtvi,  # only the browser test client speaks RTVI; phone calls skip the extra processor
     )
+
+    @llm.event_handler("on_function_calls_started")
+    async def on_tool_started(service, function_calls):
+        # Tools take 0.5-3 s (Cal.com, Supabase). A short spoken acknowledgement keeps the line
+        # from going silent; it is not added to the LLM context.
+        if spoke.spoke:  # Mia already said something before the tool call; don't talk over her
+            return
+        names = {c.function_name for c in function_calls}
+        emergency = any(c.function_name == "check_availability" and (c.arguments or {}).get("is_emergency")
+                        for c in function_calls)
+        if emergency:
+            # Spoken by code, not the LLM, so an emergency always gets an immediate human-sounding reply.
+            filler = "I'm so sorry you're hurting. Let me get you in right away. If it's ever hard to breathe or swallow, call 911."
+        elif names & {"book_appointment", "reschedule_appointment", "cancel_appointment"}:
+            filler = "Got it, one moment."
+        elif names & {"check_availability", "find_appointments"}:
+            filler = "One moment while I check."
+        else:
+            return
+        await service.push_frame(TTSSpeakFrame(filler, append_to_context=False))
 
     @transport.event_handler("on_client_connected")
     async def on_connected(_transport, _ws):
@@ -204,14 +251,18 @@ async def run_call(
         await WorkerRunner(handle_sigint=False).run(worker)
     finally:
         duration_guard.cancel()
-        await _close_call(call_id, started, transcript, session, log)
+        await _close_call(call_id, started, transcript, session, call_log_ready, log)
 
 
-async def _close_call(call_id: str, started: float, transcript: list[dict], session: CallSession, log) -> None:
+async def _close_call(
+    call_id: str, started: float, transcript: list[dict], session: CallSession, call_log_ready, log
+) -> None:
     """Bill and summarize. Runs after the caller is gone, so it costs no latency."""
     duration = int(time.monotonic() - started)
     summary = await _summarize(transcript)
     try:
+        await call_log_ready  # the row must exist before it can be finalized
+        await session.flush()  # background appointment writes
         minutes = await db.finalize_call(call_id, duration, transcript, summary, session.appointment_booked)
         log.info(f"call closed: {duration}s, billed {minutes} min, booked={session.appointment_booked}")
     except Exception:

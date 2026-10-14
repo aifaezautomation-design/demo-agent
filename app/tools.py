@@ -4,6 +4,7 @@ appointments looked up this call can be changed."""
 
 import asyncio
 import re
+import time as time_module
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -21,6 +22,7 @@ from app.db import Tenant
 _MAX_OPTIONS = 4  # returned to the LLM; the prompt tells it to offer two
 _SEARCH_DAYS = 7
 _EMERGENCY_WINDOW = timedelta(hours=2)
+_EMERGENCY_SEARCH = timedelta(hours=48)
 _MIN_LEAD_TIME = timedelta(minutes=30)
 
 
@@ -57,9 +59,13 @@ def _matches_time_of_day(dt: datetime, time_of_day: str) -> bool:
 
 
 class CallSession:
-    def __init__(self, tenant: Tenant, call_id: str, caller_phone: str | None):
+    def __init__(self, tenant: Tenant, call_id: str, caller_phone: str | None, call_log_ready: asyncio.Future | None = None):
         self.tenant = tenant
         self.call_id = call_id
+        # The call_logs insert runs in the background so the greeting isn't delayed;
+        # anything that references it (appointments FK, billing) awaits this first.
+        self._call_log_ready = call_log_ready
+        self._pending: set[asyncio.Task] = set()
         self.caller_phone = normalize_phone(caller_phone)
         self.tz = ZoneInfo(tenant.timezone)
         self.calcom = CalCom(tenant.cal_com_api_key) if tenant.cal_com_api_key else None
@@ -161,6 +167,7 @@ class CallSession:
         # Errors go back to the LLM as data so Mia can recover in conversation
         # instead of the pipeline logging a stack trace and going silent.
         async def run(params: FunctionCallParams):
+            started = time_module.monotonic()
             try:
                 result = await handler(**dict(params.arguments))
             except CalComError as e:
@@ -169,9 +176,38 @@ class CallSession:
             except Exception:
                 logger.exception(f"[{self.call_id}] {name} failed")
                 result = {"error": "internal_error", "say": "Apologize and offer to have the team call back."}
+            logger.info(f"[{self.call_id}] tool {name} took {(time_module.monotonic() - started) * 1000:.0f} ms")
             await params.result_callback(result)
 
         return run
+
+    # ---------------------------------------------------------------- background writes
+
+    def _background(self, factory, what: str) -> None:
+        """Runs a database write off the caller's critical path, tracked so it is never lost.
+
+        `factory` returns a fresh coroutine each time, so a failed write can be retried once.
+        """
+
+        async def run():
+            if self._call_log_ready is not None:
+                await asyncio.shield(self._call_log_ready)
+            for attempt in (1, 2):
+                try:
+                    return await factory()
+                except Exception:
+                    logger.exception(f"[{self.call_id}] background write '{what}' failed (attempt {attempt})")
+                    await asyncio.sleep(0.5)
+            logger.error(f"[{self.call_id}] background write '{what}' LOST; reconcile manually")
+
+        task = asyncio.ensure_future(run())
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    async def flush(self) -> None:
+        """Waits for background writes. Called before reading them back and at call end."""
+        if self._pending:
+            await asyncio.gather(*list(self._pending), return_exceptions=True)
 
     def _require_calendar(self) -> CalCom:
         if not self.calcom:
@@ -185,9 +221,7 @@ class CallSession:
         now = datetime.now(self.tz)
 
         if is_emergency:
-            event_type = self.tenant.emergency_event_type_id or self.tenant.cal_com_event_type_id
-            slots = await calcom.get_slots(event_type, now, now + _EMERGENCY_WINDOW, self.tenant.timezone)
-            return self._offer(slots[:2], none_note="no_emergency_slots_within_two_hours")
+            return await self._emergency_slots(calcom, now)
 
         try:
             day = datetime.strptime(date, "%Y-%m-%d").date()
@@ -206,6 +240,40 @@ class CallSession:
         result = self._offer(slots[:_MAX_OPTIONS], none_note=f"nothing_open_in_the_next_{_SEARCH_DAYS}_days")
         if slots:
             result["note"] = "Nothing open on the requested day; these are the nearest alternatives."
+        return result
+
+    async def _emergency_slots(self, calcom: CalCom, now: datetime) -> dict:
+        """Soonest slots for an emergency: within 2 hours, else later today, else the next two days.
+
+        One calendar request covers all three. When nothing is open today, the urgent callback is
+        flagged here, in code, so it never depends on the LLM remembering to do it.
+        """
+        event_type = self.tenant.emergency_event_type_id or self.tenant.cal_com_event_type_id
+        slots = await calcom.get_slots(event_type, now, now + _EMERGENCY_SEARCH, self.tenant.timezone)
+        slots = [s.astimezone(self.tz) for s in slots if s >= now]
+
+        within_two_hours = [s for s in slots if s <= now + _EMERGENCY_WINDOW]
+        later_today = [s for s in slots if s.date() == now.date()]
+        if within_two_hours:
+            result, window = self._offer(within_two_hours[:2]), "within_two_hours"
+        elif later_today:
+            result, window = self._offer(later_today[:2]), "later_today"
+        elif slots:
+            result, window = self._offer(slots[:2]), "next_available_not_today"
+        else:
+            result, window = {"options": []}, "none"
+
+        result["window"] = window
+        if window in ("next_available_not_today", "none"):
+            await db.flag_urgent_callback(self.call_id, "Emergency reported; no same-day slot available")
+            result["urgent_callback"] = "flagged"
+            result["say"] = (
+                "No same-day opening. Tell them you marked this urgent and a team member from the practice "
+                "will call them back very shortly to fit them in; also offer the earliest listed option."
+                if slots else
+                "No opening in the calendar. Tell them you marked this urgent and a team member from the "
+                "practice will call them back very shortly to fit them in."
+            )
         return result
 
     def _offer(self, slots: list[datetime], none_note: str = "no_slots") -> dict:
@@ -242,7 +310,7 @@ class CallSession:
         )
 
         # Shielded so a caller interruption can't cancel us between the Cal.com
-        # write and our own record of it.
+        # write and handing our own record to the background writer.
         async def write():
             booking = await calcom.create_booking(
                 event_type,
@@ -252,19 +320,20 @@ class CallSession:
                 self.tenant.timezone,
                 metadata={"visit_reason": visit_reason[:500], "source": "boltex-voice", "call_id": self.call_id},
             )
-            await db.insert_appointment(
-                {
-                    "client_id": self.tenant.id,
-                    "call_log_id": self.call_id,
-                    "cal_booking_uid": booking["uid"],
-                    "patient_name": patient_name,
-                    "patient_phone": phone,
-                    "visit_reason": visit_reason,
-                    "is_new_patient": is_new_patient,
-                    "is_emergency": is_emergency,
-                    "start_time": slot.astimezone(timezone.utc).isoformat(),
-                }
-            )
+            row = {
+                "client_id": self.tenant.id,
+                "call_log_id": self.call_id,
+                "cal_booking_uid": booking["uid"],
+                "patient_name": patient_name,
+                "patient_phone": phone,
+                "visit_reason": visit_reason,
+                "is_new_patient": is_new_patient,
+                "is_emergency": is_emergency,
+                "start_time": slot.astimezone(timezone.utc).isoformat(),
+            }
+            # The calendar is the source of truth and is already updated; our own record
+            # is written behind the reply and flushed before anything reads it back.
+            self._background(lambda: db.insert_appointment(row), f"appointment {booking['uid']}")
 
         try:
             await asyncio.shield(write())
@@ -277,6 +346,7 @@ class CallSession:
         return {"status": "booked", "time": spoken_time(slot), "patient_name": patient_name}
 
     async def find_appointments(self, phone_number: str | None = None, patient_name: str | None = None) -> dict:
+        await self.flush()
         phone = normalize_phone(phone_number) if phone_number else (None if patient_name else self.caller_phone)
         rows = await db.find_upcoming_appointments(
             self.tenant.id, phone, patient_name, datetime.now(timezone.utc).isoformat()
@@ -297,6 +367,7 @@ class CallSession:
         return {"appointments": appointments}
 
     async def _load_verified(self, appointment_id: str, phone_last4: str | None) -> tuple[dict | None, dict | None]:
+        await self.flush()
         if appointment_id not in self.found_appointments:
             return None, {"error": "unknown_appointment", "say": "Look the appointment up with find_appointments first."}
         appt = await db.get_appointment(self.tenant.id, appointment_id)

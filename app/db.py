@@ -89,13 +89,20 @@ async def get_tenant_by_number(phone_number: str) -> Tenant | None:
 
 
 async def create_call_log(
-    client_id: str, caller_phone: str, call_control_id: str | None, call_sid: str | None
+    client_id: str,
+    caller_phone: str,
+    call_control_id: str | None,
+    call_sid: str | None,
+    call_id: str | None = None,
 ) -> str:
+    """Inserts the call row. Pass `call_id` to pick the id up front, so the insert can run in the
+    background while the call starts."""
     db = await get_db()
     res = (
         await db.table("call_logs")
         .insert(
             {
+                **({"id": call_id} if call_id else {}),
                 "client_id": client_id,
                 "caller_phone": caller_phone,
                 "call_control_id": call_control_id,

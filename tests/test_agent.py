@@ -125,8 +125,14 @@ def test_booking_rejects_slot_that_was_never_offered(session):
 
 
 def test_booking_offered_slot_records_appointment(session):
-    option = run(session.check_availability(session.tomorrow.date().isoformat(), "morning"))["options"][0]
-    result = run(session.book_appointment("Jane Doe", "512-555-0199", "Cleaning", True, False, option["slot_id"]))
+    async def go():
+        option = (await session.check_availability(session.tomorrow.date().isoformat(), "morning"))["options"][0]
+        result = await session.book_appointment("Jane Doe", "512-555-0199", "Cleaning", True, False, option["slot_id"])
+        # Our own record is written behind the reply; flush() is what lookups and call-end wait on.
+        await session.flush()
+        return result
+
+    result = run(go())
     assert result["status"] == "booked"
     assert session.appointment_booked
     appt = session.fake_db.appointments["appt-1"]
@@ -251,3 +257,57 @@ def test_prompt_prefix_is_identical_across_calls():
     b = build_system_prompt(make_tenant(), "+19998887777")
     first_diff = next(i for i, (x, y) in enumerate(zip(a, b)) if x != y)
     assert first_diff > a.index("# This call")
+
+
+# --- emergency search: same-day first, urgent callback flagged in code -----------------------
+
+def _emergency_session(session, slot_hours_from_now):
+    now = datetime(2030, 1, 7, 9, 0, tzinfo=TZ)  # a Monday morning
+    session.calcom.slots = [now + timedelta(hours=h) for h in slot_hours_from_now]
+    flagged = []
+
+    async def flag(call_id, reason):
+        flagged.append(reason)
+
+    return now, flagged, flag
+
+
+def test_emergency_prefers_slot_within_two_hours(session, monkeypatch):
+    now, flagged, flag = _emergency_session(session, [0.5, 6, 27])
+    monkeypatch.setattr(tools.db, "flag_urgent_callback", flag)
+    result = run(session._emergency_slots(session.calcom, now))
+    assert result["window"] == "within_two_hours" and len(result["options"]) == 1
+    assert "urgent_callback" not in result and not flagged
+
+
+def test_emergency_falls_back_to_later_today(session, monkeypatch):
+    now, flagged, flag = _emergency_session(session, [6, 7, 27])
+    monkeypatch.setattr(tools.db, "flag_urgent_callback", flag)
+    result = run(session._emergency_slots(session.calcom, now))
+    assert result["window"] == "later_today" and len(result["options"]) == 2
+    assert not flagged
+
+
+def test_emergency_with_no_same_day_slot_flags_callback_in_code(session, monkeypatch):
+    now, flagged, flag = _emergency_session(session, [27])  # tomorrow only
+    monkeypatch.setattr(tools.db, "flag_urgent_callback", flag)
+    result = run(session._emergency_slots(session.calcom, now))
+    assert result["window"] == "next_available_not_today" and result["options"]
+    assert result["urgent_callback"] == "flagged" and len(flagged) == 1
+    assert "another" not in result["say"].lower() and "emergency room" not in result["say"].lower()
+
+
+def test_emergency_with_empty_calendar_still_flags_callback(session, monkeypatch):
+    now, flagged, flag = _emergency_session(session, [])
+    monkeypatch.setattr(tools.db, "flag_urgent_callback", flag)
+    result = run(session._emergency_slots(session.calcom, now))
+    assert result["options"] == [] and result["window"] == "none" and len(flagged) == 1
+
+
+def test_prompt_emergency_rules():
+    prompt = build_system_prompt(make_tenant(), "+15125550101")
+    section = prompt[prompt.index("# Emergencies"): prompt.index("# Ending")]
+    assert "never send the caller to another dentist" in section
+    assert "911" in section  # life-threatening only: the single exception
+    assert "nearest emergency room" not in prompt
+    assert "check_availability call with is_emergency true" in section

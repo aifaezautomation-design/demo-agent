@@ -78,6 +78,7 @@ def mount_test_ui(app: FastAPI) -> None:
             background.add_task(
                 run_call, transport, tenant,
                 caller_phone=TEST_CALLER_PHONE, call_control_id=None, call_sid=None, sample_rate=16000,
+                rtvi=True,  # the prebuilt browser client needs RTVI
             )
 
         return await handler.handle_web_request(request=body, webrtc_connection_callback=on_connection)

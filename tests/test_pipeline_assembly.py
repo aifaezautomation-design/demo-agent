@@ -14,8 +14,11 @@ from tests.test_agent import make_tenant
 def test_run_bot_assembles_and_bills(monkeypatch):
     finalized = {}
 
-    async def create_call_log(*args):
-        return "call-123"
+    created = {}
+
+    async def create_call_log(*args, call_id=None):
+        created["call_id"] = call_id
+        return call_id
 
     async def finalize_call(call_id, duration, transcript, summary, booked):
         finalized.update(call_id=call_id, duration=duration, booked=booked)
@@ -34,4 +37,5 @@ def test_run_bot_assembles_and_bills(monkeypatch):
          "from": "+15125550199", "to": "+15125550100"}
     )
     asyncio.run(bot.run_bot(MagicMock(), call_data, make_tenant(), "CA1"))
-    assert finalized["call_id"] == "call-123" and finalized["booked"] is False
+    # The id is chosen up front so the insert can run in the background.
+    assert finalized["call_id"] == created["call_id"] and finalized["booked"] is False

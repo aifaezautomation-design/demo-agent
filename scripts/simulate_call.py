@@ -214,6 +214,7 @@ async def scripted_run(args) -> int:
                 is_emergency=False,
                 slot_id=options[0]["slot_id"],
             )
+            await session.flush()  # the appointments row is written just behind the reply
             if r.check(result.get("status") == "booked", f"booked {options[0]['spoken']}", str(result)):
                 row = (await sb.table("appointments").select("*").eq("call_log_id", call_id).execute()).data
                 if r.check(len(row) == 1, "appointments row written"):
@@ -262,11 +263,12 @@ async def scripted_run(args) -> int:
                 result = await session.check_availability(datetime.now(tz).date().isoformat(), "any", is_emergency=True)
                 slots = result.get("options", [])
                 if slots:
-                    r.ok(f"emergency slot within 2 hours: {slots[0]['spoken']}")
+                    r.ok(f"emergency slot ({result.get('window')}): {slots[0]['spoken']}")
                     if args.book_emergency:
                         booked = await session.book_appointment(
                             "Simulation Emergency Patient", caller, "Emergency: knocked-out tooth",
                             False, True, slots[0]["slot_id"])
+                        await session.flush()
                         if r.check(booked.get("status") == "booked", "emergency slot booked"):
                             row = (await sb.table("appointments").select("*")
                                    .eq("call_log_id", call_id).eq("is_emergency", True).execute()).data[0]
@@ -275,7 +277,7 @@ async def scripted_run(args) -> int:
                             cancelled = await session.cancel_appointment(row["id"], "Simulation test cleanup")
                             r.check(cancelled.get("status") == "cancelled", "emergency booking cancelled again")
                 else:
-                    r.info("No slot in the next 2 hours, so Mia would flag an urgent callback. If you expected "
+                    r.info("No emergency slot in the next 48 hours, so Mia would flag an urgent callback. If you expected "
                            "one, lower the event type's minimum notice (Cal.com defaults to 2 hours).")
             except CalComError as e:
                 r.fail(f"Cal.com emergency slot search failed: {e}")
