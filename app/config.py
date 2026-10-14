@@ -40,3 +40,16 @@ CALCOM_BASE_URL = os.getenv("CALCOM_BASE_URL", "https://api.cal.com")
 
 # Hard ceiling per call so a stuck line cannot drain a tenant's minute pool.
 MAX_CALL_SECONDS = int(os.getenv("MAX_CALL_SECONDS", "900"))
+
+# --- Latency tuning (override via env to A/B test without code changes) ---
+# Send LLM text to Cartesia token by token instead of whole sentences. Off by default: no gain
+# measured locally and it can change prosody. Try on Railway: CARTESIA_STREAM_TOKENS=1 CARTESIA_MAX_BUFFER_MS=100
+CARTESIA_STREAM_TOKENS = os.getenv("CARTESIA_STREAM_TOKENS", "0") == "1"
+# Cartesia's server-side buffer before it starts speaking in token mode (ms; unset = Cartesia's 3000).
+_buf = os.getenv("CARTESIA_MAX_BUFFER_MS", "")
+CARTESIA_MAX_BUFFER_MS = int(_buf) if _buf else None
+# Deepgram's silence threshold for finalizing a transcript (ms; unset = Deepgram's default of 10).
+_ep = os.getenv("DEEPGRAM_ENDPOINTING_MS", "")
+DEEPGRAM_ENDPOINTING_MS = int(_ep) if _ep else None
+# Silence before voice-activity detection ends a turn (seconds); Smart Turn then confirms.
+VAD_STOP_SECS = float(os.getenv("VAD_STOP_SECS", "0.2"))

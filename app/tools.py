@@ -70,30 +70,30 @@ class CallSession:
     # ------------------------------------------------------------------ setup
 
     def tools_schema(self) -> ToolsSchema:
-        slot_id = {"type": "string", "description": "The slot_id of an option returned by check_availability."}
+        slot_id = {"type": "string", "description": "slot_id from check_availability."}
         phone_last4 = {
             "type": "string",
-            "description": "Last four digits of the phone number on the appointment. Required when the appointment was found by name or its number differs from the caller ID.",
+            "description": "Last 4 digits of the appointment phone; needed if found by name or the number differs from caller ID.",
         }
         return ToolsSchema(
             standard_tools=[
                 FunctionSchema(
                     name="check_availability",
-                    description="Look up open appointment slots. Call before offering any time.",
+                    description="Find open slots. Call before offering any time.",
                     properties={
-                        "date": {"type": "string", "description": "Preferred date as YYYY-MM-DD. Use today's date if the caller has no preference."},
+                        "date": {"type": "string", "description": "YYYY-MM-DD; today if no preference."},
                         "time_of_day": {"type": "string", "enum": ["morning", "afternoon", "evening", "any"]},
-                        "is_emergency": {"type": "boolean", "description": "True to search only the next two hours for an emergency."},
+                        "is_emergency": {"type": "boolean", "description": "True: search only the next two hours."},
                     },
                     required=["date", "time_of_day", "is_emergency"],
                 ),
                 FunctionSchema(
                     name="book_appointment",
-                    description="Book a confirmed slot after the caller agreed to the read-back.",
+                    description="Book a slot after the caller confirmed the read-back.",
                     properties={
                         "patient_name": {"type": "string"},
-                        "phone_number": {"type": "string", "description": "Best contact number, digits only."},
-                        "visit_reason": {"type": "string", "description": "e.g. Routine Cleaning, Toothache, Crown/Filling, Cosmetic, Emergency."},
+                        "phone_number": {"type": "string", "description": "Contact number, digits."},
+                        "visit_reason": {"type": "string", "description": "e.g. Routine Cleaning, Toothache, Crown/Filling, Cosmetic."},
                         "is_new_patient": {"type": "boolean"},
                         "is_emergency": {"type": "boolean"},
                         "slot_id": slot_id,
@@ -102,7 +102,7 @@ class CallSession:
                 ),
                 FunctionSchema(
                     name="find_appointments",
-                    description="Find the caller's upcoming appointments by phone number (preferred) or full name.",
+                    description="Find upcoming appointments by phone (preferred) or full name.",
                     properties={
                         "phone_number": {"type": "string"},
                         "patient_name": {"type": "string"},
@@ -111,7 +111,7 @@ class CallSession:
                 ),
                 FunctionSchema(
                     name="reschedule_appointment",
-                    description="Move an appointment returned by find_appointments to a new slot.",
+                    description="Move an appointment from find_appointments to a new slot.",
                     properties={
                         "appointment_id": {"type": "string"},
                         "slot_id": slot_id,
@@ -121,7 +121,7 @@ class CallSession:
                 ),
                 FunctionSchema(
                     name="cancel_appointment",
-                    description="Cancel an appointment returned by find_appointments, after the caller confirmed.",
+                    description="Cancel an appointment from find_appointments, after confirmation.",
                     properties={
                         "appointment_id": {"type": "string"},
                         "reason": {"type": "string"},
@@ -131,14 +131,14 @@ class CallSession:
                 ),
                 FunctionSchema(
                     name="flag_urgent_callback",
-                    description="Flag this call for an urgent staff callback when an emergency cannot be booked within two hours.",
-                    properties={"reason": {"type": "string", "description": "Short description of the emergency."}},
+                    description="Flag an urgent staff callback when no emergency slot exists within two hours.",
+                    properties={"reason": {"type": "string", "description": "Short emergency description."}},
                     required=["reason"],
                 ),
                 FunctionSchema(
                     name="end_call",
-                    description="Say goodbye and hang up when the caller is finished.",
-                    properties={"farewell": {"type": "string", "description": "One short, warm goodbye sentence."}},
+                    description="Say goodbye and hang up.",
+                    properties={"farewell": {"type": "string", "description": "One short goodbye."}},
                     required=["farewell"],
                 ),
             ]

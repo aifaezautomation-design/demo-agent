@@ -27,6 +27,7 @@ from pipecat.serializers.telnyx import TelnyxFrameSerializer
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.tts_service import TextAggregationMode
 from pipecat.transcriptions.language import Language
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
 from pipecat.workers.runner import WorkerRunner
@@ -54,6 +55,7 @@ def build_services() -> tuple[DeepgramSTTService, OpenAILLMService, CartesiaTTSS
             smart_format=True,
             punctuate=True,
             interim_results=True,
+            **({"endpointing": config.DEEPGRAM_ENDPOINTING_MS} if config.DEEPGRAM_ENDPOINTING_MS is not None else {}),
         ),
     )
     llm = OpenAILLMService(
@@ -67,6 +69,8 @@ def build_services() -> tuple[DeepgramSTTService, OpenAILLMService, CartesiaTTSS
     tts = CartesiaTTSService(
         api_key=config.CARTESIA_API_KEY,
         settings=CartesiaTTSService.Settings(voice=config.CARTESIA_VOICE_ID),
+        text_aggregation_mode=TextAggregationMode.TOKEN if config.CARTESIA_STREAM_TOKENS else TextAggregationMode.SENTENCE,
+        max_buffer_delay_ms=config.CARTESIA_MAX_BUFFER_MS,
     )
     return stt, llm, tts
 
@@ -125,7 +129,7 @@ async def run_call(
         user_params=LLMUserAggregatorParams(
             # Short VAD stop + Smart Turn (the default stop strategy) decides
             # end-of-turn from audio, rather than waiting on long silences.
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=config.VAD_STOP_SECS)),
             user_idle_timeout=12.0,
         ),
     )

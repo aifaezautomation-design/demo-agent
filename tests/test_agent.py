@@ -242,3 +242,11 @@ def test_webhook_signature_enforced(client, monkeypatch):
     tampered = body.replace(b"0100", b"0101")
     assert client.post("/telnyx/texml", content=tampered,
                        headers={**headers, "telnyx-signature-ed25519": good}).status_code == 401
+
+
+def test_prompt_prefix_is_identical_across_calls():
+    # OpenAI caches the longest identical prompt prefix; per-call details must stay at the end.
+    a = build_system_prompt(make_tenant(), "+15125550101")
+    b = build_system_prompt(make_tenant(), "+19998887777")
+    first_diff = next(i for i, (x, y) in enumerate(zip(a, b)) if x != y)
+    assert first_diff > a.index("# This call")
