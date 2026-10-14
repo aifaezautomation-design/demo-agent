@@ -9,3 +9,7 @@ for name in [
 os.environ.setdefault("PUBLIC_HOST", "voice.test")
 os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
 os.environ["TELNYX_PUBLIC_KEY"] = ""
+
+
+# Shared fixture: a call session with a fake calendar and fake database (defined in test_agent.py).
+from tests.test_agent import session  # noqa: E402,F401

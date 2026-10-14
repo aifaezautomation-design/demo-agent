@@ -16,7 +16,7 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import EndWorkerFrame, FunctionCallResultProperties, TTSSpeakFrame
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 
-from app import config, db
+from app import config, db, notify
 from app import language as language_module
 from app.calcom import CalCom, CalComError
 from app.db import Tenant
@@ -543,6 +543,25 @@ class CallSession:
             # The calendar is the source of truth and is already updated; our own record
             # is written behind the reply and flushed before anything reads it back.
             self._background(lambda: db.insert_appointment(row), f"appointment {booking['uid']}")
+            # Email the practice. Scheduled, never awaited: the caller's reply does not wait for it, and nothing
+            # in here may turn a booking that already exists in the calendar into an error for the caller.
+            try:
+                notify.notify_booking(
+                    notify.BookingEmail(
+                        practice=self.tenant.name,
+                        patient_name=patient_name,
+                        patient_phone=phone,
+                        reason=visit_reason,
+                        start=slot,
+                        timezone_name=self.tenant.timezone,
+                        is_emergency=is_emergency,
+                        is_new_patient=is_new_patient,
+                        booking_uid=booking["uid"],
+                    ),
+                    self.tenant.knowledge_base,
+                )
+            except Exception:
+                logger.exception(f"[{self.call_id}] booking email could not be scheduled")
 
         try:
             await asyncio.shield(write())

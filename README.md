@@ -101,3 +101,15 @@ Transcripts and recordings are PHI. You need BAAs with Telnyx, Deepgram, OpenAI,
 | `CARTESIA_VOLUME` | `1.4` | Voice volume, 0.5 to 2.0 (clips above about 1.5) |
 | `CARTESIA_STREAM_TOKENS` | `0` | Token-by-token text to the voice; no gain measured |
 | `VAD_STOP_SECS` | `0.2` | Silence before a turn can end |
+
+## Booking notification emails
+
+When Mia books an appointment, the practice gets an email (Resend) with the patient's name, phone, service or reason, date and time,
+and time zone. It is scheduled in the background and never awaited, so it adds no time to the call; if Resend fails, the error is
+logged and the call and the booking carry on. Off unless `RESEND_API_KEY` is set.
+
+- `NOTIFY_EMAIL_TO` is the default recipient; a practice can have its own with `notify_email` in its `knowledge_base`.
+- **Resend's sandbox sender (`onboarding@resend.dev`) can only email the address that owns the Resend account.** To email anyone
+  else, verify a domain at resend.com/domains and set `NOTIFY_EMAIL_FROM` to an address on it.
+- The email contains patient information. Use a mailbox the practice controls, and check this against your HIPAA obligations
+  (Resend would need a BAA) before using it with real patients.

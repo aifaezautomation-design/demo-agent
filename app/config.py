@@ -71,3 +71,10 @@ MULTILINGUAL_ENABLED = os.getenv("MULTILINGUAL_ENABLED", "0") == "1"
 # caller is done. "flux" = Deepgram Flux (English-only), which predicts the end of the turn itself and lets the LLM
 # start answering before the transcript is final.
 DEEPGRAM_STT = os.getenv("DEEPGRAM_STT", "nova")
+
+# Booking notification emails (Resend). Off unless RESEND_API_KEY is set. A tenant can override the recipient with
+# `notify_email` in its knowledge base. Resend only lets an unverified sender (onboarding@resend.dev) email the
+# address that owns the Resend account; verify a domain to send to anyone.
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+NOTIFY_EMAIL_TO = os.getenv("NOTIFY_EMAIL_TO", "")
+NOTIFY_EMAIL_FROM = os.getenv("NOTIFY_EMAIL_FROM", "Mia Receptionist <onboarding@resend.dev>")
