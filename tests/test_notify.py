@@ -207,3 +207,10 @@ def test_a_booking_still_succeeds_when_the_email_code_blows_up(session, on, monk
 
     # the failure must not turn a real calendar booking into an error for the caller
     assert _run(go())["status"] == "booked"
+
+
+def test_the_test_suite_can_never_send_a_real_email():
+    # tests/conftest.py blanks the key before app.config loads .env; without this a test booking would email the practice.
+    from app import config as cfg
+
+    assert cfg.RESEND_API_KEY == ""

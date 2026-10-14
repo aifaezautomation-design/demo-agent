@@ -49,7 +49,7 @@ Insert a `clients` row (number, timezone, Cal.com event type, `knowledge_base` J
 - **Guardrails live in code, not just the prompt.** `book_appointment` and `reschedule_appointment` only accept slot IDs that `check_availability` returned during the current call. Reschedule and cancel only act on appointments found during the call, and require the last four digits of the phone on file when it differs from the caller ID.
 - **Appointments are mirrored in Supabase.** Cal.com v2 can't search bookings by phone, so lookups use the `appointments` table. Calendar writes plus their database records are shielded from barge-in cancellation, so an interruption can't leave the two out of sync.
 - **Billing is atomic and idempotent.** `finalize_call()` closes the call log and deducts minutes in one transaction, and runs at most once per call. Calls to a practice that is out of minutes are refused at the TeXML step, before any AI cost.
-- **No email or SMS is sent.** The booking API version `2026-02-25` makes attendee email optional, and none is sent. Also turn off attendee notifications on each Cal.com event type.
+- **Patients are never emailed or texted.** (The practice does get one staff notification email per booking, see below.) The booking API version `2026-02-25` makes attendee email optional, and none is sent. Also turn off attendee notifications on each Cal.com event type.
 - **Recording is opt-in per practice** (`clients.record_calls`). When it's on, Mia's greeting discloses it, because recording consent laws differ by state. Files are copied into a private Supabase bucket, since Telnyx recording links expire.
 - **The Boltex pitch only plays in demo mode** (`clients.demo_mode`). Production practices get an honest AI disclosure without a sales pitch.
 
@@ -111,5 +111,7 @@ logged and the call and the booking carry on. Off unless `RESEND_API_KEY` is set
 - `NOTIFY_EMAIL_TO` is the default recipient; a practice can have its own with `notify_email` in its `knowledge_base`.
 - **Resend's sandbox sender (`onboarding@resend.dev`) can only email the address that owns the Resend account.** To email anyone
   else, verify a domain at resend.com/domains and set `NOTIFY_EMAIL_FROM` to an address on it.
+  Check the setup with `python scripts/real_send_check.py` (sends one clearly labelled test email). The test suite and
+  `scripts/simulate_call.py` never send real email.
 - The email contains patient information. Use a mailbox the practice controls, and check this against your HIPAA obligations
   (Resend would need a BAA) before using it with real patients.

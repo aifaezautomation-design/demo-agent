@@ -77,6 +77,12 @@ for _name in ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"):
     if not os.getenv(_name):
         os.environ[_name] = _PLACEHOLDER
 
+from app import config as _config  # noqa: E402
+
+# The simulation books and cancels real test appointments; it must not email the practice about each one.
+# (Use scripts/real_send_check.py or a real call to test the email itself.)
+_config.RESEND_API_KEY = ""
+
 from app import db  # noqa: E402
 from app.calcom import CalComError  # noqa: E402
 from app.prompts import build_system_prompt  # noqa: E402

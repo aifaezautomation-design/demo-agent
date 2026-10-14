@@ -9,6 +9,9 @@ for name in [
 os.environ.setdefault("PUBLIC_HOST", "voice.test")
 os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
 os.environ["TELNYX_PUBLIC_KEY"] = ""
+# Tests load the real .env too: never let a test booking send a real notification email. tests/test_notify.py
+# turns it back on with a fake transport where it needs to.
+os.environ["RESEND_API_KEY"] = ""
 
 
 # Shared fixture: a call session with a fake calendar and fake database (defined in test_agent.py).
