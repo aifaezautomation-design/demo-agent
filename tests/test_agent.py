@@ -95,6 +95,13 @@ def run(coro):
     return asyncio.run(coro)
 
 
+async def _search_and_flush(session, now):
+    """The emergency search, then wait for its background writes (production waits for them when the call ends)."""
+    result = await session._emergency_slots(session.calcom, now)
+    await session.flush()
+    return result
+
+
 def test_normalize_phone():
     assert normalize_phone("(512) 555-0199") == "+15125550199"
     assert normalize_phone("1-512-555-0199") == "+15125550199"
@@ -166,14 +173,32 @@ def test_cancel_requires_lookup_and_phone_verification(session):
     assert session.calcom.cancelled == ["uid-x"]
 
 
-def test_services_construct_with_configured_settings():
+def test_services_construct_with_configured_settings(monkeypatch):
     from app.bot import build_services
 
-    stt, llm, tts = build_services()
-    assert llm._settings.model == "gpt-4o-mini" and llm._settings.temperature == 0.2
-    assert stt._settings.model == "nova-3-general" and stt._settings.smart_format is True
+    stt, llm, tts = build_services(["Dr. Sarah Jenkins", "Delta Dental"])  # default engine: Deepgram Flux (English)
+    assert llm._settings.model == "gpt-4o-mini" and llm._settings.temperature == config.OPENAI_TEMPERATURE <= 0.3
+    assert llm._settings.max_tokens == config.OPENAI_MAX_TOKENS <= 150
+    assert stt._settings.model == "flux-general-en"
+    assert stt._settings.eager_eot_threshold == 0.5 and stt._settings.eot_threshold == 0.7
+    assert stt._settings.eot_timeout_ms == 2000  # Flux's own default is 5000: a paused caller is not left waiting 5 s
+    assert stt._settings.keyterm == ["Dr. Sarah Jenkins", "Delta Dental"]
     assert tts._settings.voice == config.CARTESIA_VOICE_ID
     assert tts._settings.generation_config.volume == config.CARTESIA_VOLUME == 1.4
+
+    monkeypatch.setattr(config, "DEEPGRAM_STT", "nova")  # the rollback setting
+    stt, _, _ = build_services()
+    assert stt._settings.model == "nova-3-general" and stt._settings.smart_format is True
+
+
+def test_keyterms_come_from_the_clinic_knowledge_base():
+    from app.bot import keyterms_for
+
+    terms = keyterms_for(APEX_KB)
+    for expected in ["Dr. Sarah Jenkins", "Sarah Jenkins", "Michael Vance", "Delta Dental", "Premier Access", "dentists", "root canal"]:
+        assert expected in terms, expected
+    assert len(terms) == len({t.lower() for t in terms}) <= 30  # no duplicates, bounded
+    assert keyterms_for(None)[:1] == ["dentist"] and keyterms_for({}) == keyterms_for(None)
 
 
 @pytest.fixture
@@ -279,7 +304,7 @@ def _emergency_session(session, slot_hours_from_now):
 def test_emergency_prefers_slot_within_two_hours(session, monkeypatch):
     now, flagged, flag = _emergency_session(session, [0.5, 6, 27])
     monkeypatch.setattr(tools.db, "flag_urgent_callback", flag)
-    result = run(session._emergency_slots(session.calcom, now))
+    result = run(_search_and_flush(session, now))
     assert result["window"] == "within_two_hours" and len(result["options"]) == 1
     assert "urgent_callback" not in result and not flagged
 
@@ -287,7 +312,7 @@ def test_emergency_prefers_slot_within_two_hours(session, monkeypatch):
 def test_emergency_falls_back_to_later_today(session, monkeypatch):
     now, flagged, flag = _emergency_session(session, [6, 7, 27])
     monkeypatch.setattr(tools.db, "flag_urgent_callback", flag)
-    result = run(session._emergency_slots(session.calcom, now))
+    result = run(_search_and_flush(session, now))
     assert result["window"] == "later_today" and len(result["options"]) == 2
     assert not flagged
 
@@ -295,7 +320,7 @@ def test_emergency_falls_back_to_later_today(session, monkeypatch):
 def test_emergency_with_no_same_day_slot_flags_callback_in_code(session, monkeypatch):
     now, flagged, flag = _emergency_session(session, [27])  # tomorrow only
     monkeypatch.setattr(tools.db, "flag_urgent_callback", flag)
-    result = run(session._emergency_slots(session.calcom, now))
+    result = run(_search_and_flush(session, now))
     assert result["window"] == "next_available_not_today" and result["options"]
     assert result["urgent_callback"] == "flagged" and len(flagged) == 1
     assert "another" not in result["say"].lower() and "emergency room" not in result["say"].lower()
@@ -304,7 +329,7 @@ def test_emergency_with_no_same_day_slot_flags_callback_in_code(session, monkeyp
 def test_emergency_with_empty_calendar_still_flags_callback(session, monkeypatch):
     now, flagged, flag = _emergency_session(session, [])
     monkeypatch.setattr(tools.db, "flag_urgent_callback", flag)
-    result = run(session._emergency_slots(session.calcom, now))
+    result = run(_search_and_flush(session, now))
     assert result["options"] == [] and result["window"] == "none" and len(flagged) == 1
 
 
@@ -596,7 +621,7 @@ def test_an_after_hours_emergency_is_flagged_not_booked(session, monkeypatch):
     monkeypatch.setattr(tools.db, "flag_urgent_callback", flag)
     now = _at(2030, 1, 9, 19, 30)  # 7:30 PM Wednesday: closed. A calendar that offered 8 PM would still not be booked.
     session.calcom.slots = [now + timedelta(minutes=30)]
-    result = run(session._emergency_slots(session.calcom, now))
+    result = run(_search_and_flush(session, now))
     assert result["options"] == [] and result["urgent_callback"] == "flagged" and flagged
 
 
@@ -657,3 +682,84 @@ def test_guard_matches_the_calcom_schedule_exactly_in_every_season():
             mismatches.append(moment.isoformat())
         moment += timedelta(minutes=30)
     assert not mismatches, mismatches[:5]
+
+
+
+# --- bookkeeping writes happen behind the reply -------------------------------------------------------------------
+
+class _SlowDB:
+    """Every database write takes 300 ms; reads of rows we already hold must not touch the database at all."""
+
+    def __init__(self, inner):
+        self.inner, self.delay, self.calls = inner, 0.3, []
+
+    def __getattr__(self, name):
+        real = getattr(self.inner, name)
+
+        async def call(*a, **k):
+            self.calls.append(name)
+            await asyncio.sleep(self.delay)
+            return await real(*a, **k)
+
+        return call
+
+
+def _slow_db(session, monkeypatch):
+    slow = _SlowDB(session.fake_db)
+    for name in ("insert_appointment", "find_upcoming_appointments", "get_appointment", "update_appointment", "flag_urgent_callback"):
+        monkeypatch.setattr(tools.db, name, getattr(slow, name))
+    return slow
+
+
+def test_cancel_and_reschedule_do_not_wait_for_the_database(session, monkeypatch):
+    run(session.fake_db.insert_appointment({"patient_name": "Bob Smith", "patient_phone": "+15125550199", "cal_booking_uid": "uid-x",
+                                            "start_time": session.tomorrow.isoformat(), "visit_reason": "Crown"}))
+    slow = _slow_db(session, monkeypatch)
+
+    async def go():
+        await session.find_appointments()                       # one real read (300 ms)
+        opts = (await session.check_availability(session.tomorrow.date().isoformat(), "any"))["options"]
+        t0 = time.perf_counter()
+        moved = await session.reschedule_appointment("appt-1", opts[1]["slot_id"])
+        cancelled = await session.cancel_appointment("appt-1", "changed my mind")
+        took = time.perf_counter() - t0
+        await session.flush()
+        return moved, cancelled, took
+
+    moved, cancelled, took = run(go())
+    assert moved["status"] == "rescheduled" and cancelled["status"] == "cancelled"
+    assert took < 0.25, f"two changes took {took:.2f}s: a 300 ms database write is on the caller's path"
+    assert "get_appointment" not in slow.calls                  # served from the lookup already made in this call
+    assert slow.calls.count("update_appointment") == 2          # both writes did happen, after the replies
+    assert session.fake_db.appointments["appt-1"]["status"] == "cancelled"
+    assert session.fake_db.appointments["appt-1"]["cal_booking_uid"] == "uid-x-r"
+
+
+def test_a_cancelled_appointment_cannot_be_cancelled_twice_in_one_call(session):
+    run(session.fake_db.insert_appointment({"patient_name": "Bob Smith", "patient_phone": "+15125550199", "cal_booking_uid": "uid-x",
+                                            "start_time": session.tomorrow.isoformat(), "visit_reason": "Crown"}))
+
+    async def go():
+        await session.find_appointments()
+        first = await session.cancel_appointment("appt-1", "x")
+        second = await session.cancel_appointment("appt-1", "x")
+        await session.flush()
+        return first, second
+
+    first, second = run(go())
+    assert first["status"] == "cancelled" and second["error"] == "appointment_not_active"
+    assert session.calcom.cancelled == ["uid-x"]
+
+
+def test_flagging_an_urgent_callback_returns_at_once(session, monkeypatch):
+    slow = _slow_db(session, monkeypatch)
+
+    async def go():
+        t0 = time.perf_counter()
+        result = await session.flag_urgent_callback("test")
+        took = time.perf_counter() - t0
+        await session.flush()
+        return result, took
+
+    result, took = run(go())
+    assert result["status"] == "flagged" and took < 0.1 and slow.calls == ["flag_urgent_callback"]

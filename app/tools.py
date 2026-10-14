@@ -210,6 +210,8 @@ class CallSession:
         self.calcom = CalCom(tenant.cal_com_api_key) if tenant.cal_com_api_key else None
         self.offered_slots: dict[str, datetime] = {}
         self.found_appointments: set[str] = set()
+        # Rows returned by find_appointments, kept for the call so changing an appointment needs no second database read.
+        self._appt_cache: dict[str, dict] = {}
         # Everything the caller has said, so a booking can be checked against it (see _name_is_from_caller).
         self.heard: list[str] = []
         self.appointment_booked = False
@@ -364,6 +366,10 @@ class CallSession:
         self._pending.add(task)
         task.add_done_callback(self._pending.discard)
 
+    def _flag_urgent(self, reason: str) -> None:
+        """Marks the call for an urgent staff callback, behind the reply (the caller never waits on this write)."""
+        self._background(lambda: db.flag_urgent_callback(self.call_id, reason[:500]), "urgent callback")
+
     async def flush(self) -> None:
         """Waits for background writes. Called before reading them back and at call end."""
         if self._pending:
@@ -466,7 +472,7 @@ class CallSession:
 
         result["window"] = window
         if window in ("next_available_not_today", "none"):
-            await db.flag_urgent_callback(self.call_id, "Emergency reported; no same-day slot available")
+            self._flag_urgent("Emergency reported; no same-day slot available")
             result["urgent_callback"] = "flagged"
             result["say"] = (
                 "No same-day opening. Tell them you marked this urgent and a team member from the practice "
@@ -584,6 +590,7 @@ class CallSession:
         appointments = []
         for r in rows:
             self.found_appointments.add(r["id"])
+            self._appt_cache[r["id"]] = {**r, "status": "booked"}  # find_appointments never returns cancelled rows
             appointments.append(
                 {
                     "appointment_id": r["id"],
@@ -595,10 +602,12 @@ class CallSession:
         return {"appointments": appointments}
 
     async def _load_verified(self, appointment_id: str, phone_last4: str | None) -> tuple[dict | None, dict | None]:
-        await self.flush()
         if appointment_id not in self.found_appointments:
             return None, {"error": "unknown_appointment", "say": "Look the appointment up with find_appointments first."}
-        appt = await db.get_appointment(self.tenant.id, appointment_id)
+        appt = self._appt_cache.get(appointment_id)
+        if appt is None:  # not looked up through the cache (should not happen): fall back to the database
+            await self.flush()
+            appt = await db.get_appointment(self.tenant.id, appointment_id)
         if not appt or appt["status"] == "cancelled":
             return None, {"error": "appointment_not_active"}
         if appt["patient_phone"] != self.caller_phone:
@@ -621,15 +630,14 @@ class CallSession:
 
         async def write():
             booking = await calcom.reschedule_booking(appt["cal_booking_uid"], slot.astimezone(timezone.utc))
-            await db.update_appointment(
-                self.tenant.id,
-                appointment_id,
-                {
-                    "cal_booking_uid": booking.get("uid", appt["cal_booking_uid"]),
-                    "start_time": slot.astimezone(timezone.utc).isoformat(),
-                    "status": "rescheduled",
-                },
-            )
+            changes = {
+                "cal_booking_uid": booking.get("uid", appt["cal_booking_uid"]),
+                "start_time": slot.astimezone(timezone.utc).isoformat(),
+                "status": "rescheduled",
+            }
+            self._appt_cache.setdefault(appointment_id, appt).update(changes)  # a later change in this call sees it
+            # The calendar is already updated; our own record follows behind the reply.
+            self._background(lambda: db.update_appointment(self.tenant.id, appointment_id, changes), f"reschedule {appointment_id}")
 
         try:
             await asyncio.shield(write())
@@ -647,7 +655,10 @@ class CallSession:
 
         async def write():
             await calcom.cancel_booking(appt["cal_booking_uid"], reason[:500] or "Cancelled by patient")
-            await db.update_appointment(self.tenant.id, appointment_id, {"status": "cancelled"})
+            self._appt_cache.setdefault(appointment_id, appt)["status"] = "cancelled"
+            self._background(
+                lambda: db.update_appointment(self.tenant.id, appointment_id, {"status": "cancelled"}), f"cancel {appointment_id}"
+            )
 
         await asyncio.shield(write())
         return {"status": "cancelled"}
@@ -663,7 +674,7 @@ class CallSession:
         return {"status": "ok", "language": code, "say": "Reply in this language from now on."}
 
     async def flag_urgent_callback(self, reason: str) -> dict:
-        await db.flag_urgent_callback(self.call_id, reason[:500])
+        self._flag_urgent(reason)
         return {"status": "flagged", "say": "Tell them a team member will call back as soon as possible."}
 
     async def end_call(self, params: FunctionCallParams) -> None:

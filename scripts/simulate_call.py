@@ -245,6 +245,7 @@ async def scripted_run(args) -> int:
             r.skip("needs a booking and a second offered slot")
         else:
             result = await session.reschedule_appointment(appt_id, options[1]["slot_id"])
+            await session.flush()  # the appointments row is updated just behind the reply
             if r.check(result.get("status") == "rescheduled", f"moved to {options[1]['spoken']}", str(result)):
                 row = await fetch_one("appointments", "id", appt_id)
                 moved = datetime.fromisoformat(row["start_time"]) == session.offered_slots[options[1]["slot_id"]]
@@ -256,6 +257,7 @@ async def scripted_run(args) -> int:
         else:
             try:
                 result = await session.cancel_appointment(appt_id, "Simulation test cleanup")
+                await session.flush()
                 r.check(result.get("status") == "cancelled", "cancelled in Cal.com")
                 row = await fetch_one("appointments", "id", appt_id)
                 r.check(row["status"] == "cancelled", "appointments row marked cancelled")

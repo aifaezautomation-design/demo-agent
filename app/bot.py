@@ -68,12 +68,34 @@ def _greeting(tenant: Tenant) -> str:
     return f"Thanks for calling {tenant.name}, this is Mia.{disclosure} How can I help you today?"
 
 
-def build_stt(language: str):
+def keyterms_for(kb: dict | None) -> list[str]:
+    """Words Deepgram should favour: the practice's dentists, services, and insurers (names a generic model gets wrong)."""
+    kb = kb or {}
+    terms: list[str] = []
+    for member in kb.get("team", []):
+        name = member.get("name", "")
+        terms += [name, name.replace("Dr. ", "").strip()]
+    terms += list(kb.get("insurances", []))
+    terms += [sv["name"] for sv in kb.get("services", []) if len(sv.get("name", "")) <= 30]
+    terms += ["dentist", "dentists", "orthodontist", "root canal", "crown", "whitening"]
+    seen: set[str] = set()
+    return [t for t in terms if t and not (t.lower() in seen or seen.add(t.lower()))][:30]
+
+
+def build_stt(language: str, keyterms: list[str] | None = None):
     if config.DEEPGRAM_STT == "flux" and language == "en" and not config.MULTILINGUAL_ENABLED:
+        # Flux ends the turn itself and signals an *eager* end of turn, so the LLM can start while the caller's last
+        # words are still being finalised (Pipecat withdraws the guess, and never runs a tool, if the caller goes on).
         return DeepgramFluxSTTService(
             api_key=config.DEEPGRAM_API_KEY,
             enable_eager_end_of_turn=True,
-            settings=DeepgramFluxSTTService.Settings(model="flux-general-en"),
+            settings=DeepgramFluxSTTService.Settings(
+                model="flux-general-en",
+                eager_eot_threshold=config.FLUX_EAGER_EOT_THRESHOLD,
+                eot_threshold=config.FLUX_EOT_THRESHOLD,
+                eot_timeout_ms=config.FLUX_EOT_TIMEOUT_MS,
+                keyterm=keyterms or [],
+            ),
         )
     return _build_nova_stt(language)
 
@@ -92,14 +114,14 @@ def _build_nova_stt(language: str) -> DeepgramSTTService:
     )
 
 
-def build_services() -> tuple[DeepgramSTTService, OpenAILLMService, CartesiaTTSService]:
-    stt = build_stt(config.DEEPGRAM_LANGUAGE)
+def build_services(keyterms: list[str] | None = None) -> tuple[DeepgramSTTService, OpenAILLMService, CartesiaTTSService]:
+    stt = build_stt(config.DEEPGRAM_LANGUAGE, keyterms)
     llm = OpenAILLMService(
         api_key=config.OPENAI_API_KEY,
         settings=OpenAILLMService.Settings(
             model=config.OPENAI_MODEL,
             temperature=config.OPENAI_TEMPERATURE,
-            max_tokens=200,  # voice turns are short; caps runaway answers
+            max_tokens=config.OPENAI_MAX_TOKENS,  # voice turns are short; caps runaway answers
         ),
     )
     tts = CartesiaTTSService(
@@ -162,7 +184,7 @@ async def run_call(
     transcript: list[dict] = []
     log = logger.bind(call_id=call_id, client_id=tenant.id)
 
-    stt, llm, tts = build_services()
+    stt, llm, tts = build_services(keyterms_for(tenant.knowledge_base))
     session.register(llm)
     stt_node, language_detector = stt, None
     if config.MULTILINGUAL_ENABLED:

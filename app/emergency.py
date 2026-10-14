@@ -18,7 +18,7 @@ import json
 import re
 
 from loguru import logger
-from pipecat.frames.frames import Frame, LLMMessagesAppendFrame, TranscriptionFrame, TTSSpeakFrame
+from pipecat.frames.frames import EagerTranscriptionFrame, Frame, LLMMessagesAppendFrame, TranscriptionFrame, TTSSpeakFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 # Phrases like "no pain", "not an emergency", "doesn't have any swelling" must not count.
@@ -86,13 +86,14 @@ AIRWAY_LINE = (
 
 _NEVER_ELSEWHERE = (
     "Never send the caller to another dentist, clinic, urgent care, or emergency room, and do not mention 911 yourself: "
-    "the system already told them what to do if breathing gets hard."
+    "the system already told them what to do if breathing gets hard. Do not call any tool in this reply: any callback "
+    "is already flagged, and booking waits until they give their name."
 )
 _NOTE_SLOT = (
     "EMERGENCY, handled by the system. The caller reported {kind}. The system already spoke a caring line{aid}, searched "
     "the practice's calendar, and told the caller: '{said}'\n"
     "Calendar result: {result}\n"
-    "Do NOT search again, do not repeat the time, and do not say 'one moment'. Your reply is one short sentence asking "
+    "Do NOT search again, do not repeat the time, do not say 'one moment', and do not apologise or sympathise again (the system already did). Your reply is one short sentence asking "
     "for their name so you can book that opening (the caller ID is their number). Call book_appointment with is_emergency "
     "true and that slot only after they tell you their name. " + _NEVER_ELSEWHERE
 )
@@ -100,7 +101,7 @@ _NOTE_CALLBACK_SLOT = (
     "EMERGENCY, handled by the system. The caller reported {kind}. The system already spoke a caring line{aid}, searched "
     "the calendar, flagged an urgent callback, and told the caller: '{said}'\n"
     "Calendar result: {result}\n"
-    "Do NOT search again and do not repeat what was said. Your reply is one short sentence asking for their name so you "
+    "Do NOT search again, do not repeat what was said, and do not apologise or sympathise again (the system already did). Your reply is one short sentence asking for their name so you "
     "can book that earliest opening (the caller ID is their number). Call book_appointment with is_emergency true and that "
     "slot only after they tell you their name. " + _NEVER_ELSEWHERE
 )
@@ -113,7 +114,7 @@ _NOTE_NOTHING = (
 _AIRWAY_NOTE = (
     "EMERGENCY, handled by the system. The caller described trouble breathing or swallowing. The system already told "
     "them to call 911 and flagged an urgent callback for the team. Reply with at most one short caring sentence that "
-    "repeats it (call 911 now; the team will follow up). Do not offer an appointment and do not ask questions."
+    "repeats it (call 911 now; the team will follow up). Do not offer an appointment, do not ask questions, and do not call any tool (the callback is already flagged)."
 )
 
 
@@ -173,34 +174,64 @@ class EmergencyTriage(FrameProcessor):
         await super().process_frame(frame, direction)
         before: list[Frame] = []
         after: list[Frame] = []
-        if isinstance(frame, TranscriptionFrame) and direction == FrameDirection.DOWNSTREAM and self._language.current == "en":
-            kind = classify(frame.text)
-            if kind == "airway" and not self._handled_airway:
-                self._handled_airway = True
-                before, after = await self._airway(frame)
-            elif kind == "emergency" and not self._handled_emergency:
-                self._handled_emergency = True
-                before, after = await self._emergency(frame)
+        if direction == FrameDirection.DOWNSTREAM:
+            before, after = await self.triage(frame, lambda f: self.push_frame(f, direction))
         for f in before:
             await self.push_frame(f, direction)
         await self.push_frame(frame, direction)
         for f in after:
             await self.push_frame(f, direction)
 
-    async def _airway(self, frame: TranscriptionFrame) -> tuple[list[Frame], list[Frame]]:
-        """(frames to send before the transcript, frames to send after it)."""
+    async def triage(self, frame: Frame, emit=None) -> tuple[list[Frame], list[Frame]]:
+        """(frames to send before this frame, frames to send after it) for what the caller just said.
+
+        Flux speech recognition announces an EAGER end of turn: a provisional transcript that starts the LLM before the
+        turn is final, and whose response is kept if the final transcript agrees. Two consequences:
+          * triage must act on the eager transcript, ahead of it: acting only on the final one meant the model had
+            already answered without the emergency note (it offered a next-day slot and promised a callback that was
+            never flagged);
+          * the spoken lines must go out BEFORE the eager transcript, through `emit`: once speculation has started, the
+            speculation gate holds every later frame and releases it behind the model's reply, so the caller heard the
+            model's "may I have your name?" before the first-aid advice. (Speaking early is safe: these lines cannot be
+            interrupted.) With a final-transcript-only speech engine the lines follow the transcript instead.
+        """
+        if not isinstance(frame, (TranscriptionFrame, EagerTranscriptionFrame)) or self._language.current != "en":
+            return [], []
+        speak_now = emit if isinstance(frame, EagerTranscriptionFrame) else None
+        kind = classify(frame.text)
+        if kind == "airway" and not self._handled_airway:
+            self._handled_airway = True
+            return await self._airway(frame, speak_now)
+        if kind == "emergency" and not self._handled_emergency:
+            self._handled_emergency = True
+            return await self._emergency(frame, speak_now)
+        return [], []
+
+    async def _airway(self, frame: TranscriptionFrame, speak_now=None) -> tuple[list[Frame], list[Frame]]:
+        """(frames to send before the transcript, frames to send after it). With `speak_now`, the 911 line is said at once."""
         logger.info(f"[{self._session.call_id}] triage: AIRWAY ({frame.text[:60]!r})")
+        line = _speak(AIRWAY_LINE)
+        if speak_now:
+            await speak_now(line)  # before anything else, even the callback write
         try:
             await self._session.flag_urgent_callback("Caller reported trouble breathing or swallowing (told to call 911)")
         except Exception:
             logger.exception("could not flag the airway callback")
         note = LLMMessagesAppendFrame([{"role": "developer", "content": _AIRWAY_NOTE}], run_llm=False)
-        return [note], [_speak(AIRWAY_LINE)]
+        return [note], ([] if speak_now else [line])
 
-    async def _emergency(self, frame: TranscriptionFrame) -> tuple[list[Frame], list[Frame]]:
+    async def _emergency(self, frame: TranscriptionFrame, speak_now=None) -> tuple[list[Frame], list[Frame]]:
         logger.info(f"[{self._session.call_id}] triage: EMERGENCY ({frame.text[:60]!r})")
         aid = knocked_out(frame.text)
-        spoken = [_speak(self._line(aid))]
+        spoken: list[Frame] = []
+
+        async def say(f: Frame) -> None:
+            if speak_now:
+                await speak_now(f)  # straight away: the caring line does not wait for the calendar search below
+            else:
+                spoken.append(f)
+
+        await say(_speak(self._line(aid)))
         try:
             result = await self._session.emergency_search()
         except Exception:
@@ -209,7 +240,7 @@ class EmergencyTriage(FrameProcessor):
             return [], spoken
         extra_line, note = plan(result, aid, self._session.tenant.name)
         if extra_line:
-            spoken.append(_speak(extra_line))
+            await say(_speak(extra_line))
         return [LLMMessagesAppendFrame([{"role": "developer", "content": note}], run_llm=False)], spoken
 
     @staticmethod

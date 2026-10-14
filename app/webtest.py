@@ -76,7 +76,7 @@ def mount_test_ui(app: FastAPI) -> None:
             logger.info(f"browser test call: tenant={tenant.id} caller={TEST_CALLER_PHONE}")
             background.add_task(
                 run_call, transport, tenant,
-                caller_phone=TEST_CALLER_PHONE, call_control_id=None, call_sid=None, sample_rate=16000,
+                caller_phone=TEST_CALLER_PHONE, call_control_id=None, call_sid=None, sample_rate=int(os.getenv("TEST_UI_SAMPLE_RATE", "16000")),
                 rtvi=True,  # the prebuilt browser client needs RTVI
             )
 

@@ -96,22 +96,25 @@ Transcripts and recordings are PHI. You need BAAs with Telnyx, Deepgram, OpenAI,
 
 | Variable | Default | What it does |
 |---|---|---|
-| `MULTILINGUAL_ENABLED` | `0` | `1` turns on language detection and Urdu switching |
-| `DEEPGRAM_STT` | `nova` | `flux` uses Deepgram Flux (English), which can start the LLM before the transcript is final: about 0.3 s faster in a local A/B, not yet tried on real phone audio |
+| `DEEPGRAM_STT` | `flux` | `flux` = Deepgram Flux (English): it ends the caller's turn itself and starts the LLM while the last words are still being finalised, about 0.25-0.3 s faster on ordinary turns (no change on calendar-lookup turns). `nova` = Deepgram nova-3 with Pipecat's own turn detection: the one-line rollback |
+| `FLUX_EAGER_EOT_THRESHOLD` / `FLUX_EOT_THRESHOLD` | `0.5` / `0.7` | How sure Flux must be to start the LLM early / to end the turn. More aggressive values made no difference in testing |
+| `FLUX_EOT_TIMEOUT_MS` | `2000` | Longest silence before the turn ends whatever the confidence (Flux's own default is 5000) |
+| `OPENAI_MODEL` / `OPENAI_TEMPERATURE` / `OPENAI_MAX_TOKENS` | `gpt-4o-mini` / `0.3` / `150` | Real replies average about 30 tokens and peak near 65, so the bound only cuts off a runaway answer. Temperature does not change latency |
+| `MULTILINGUAL_ENABLED` | `0` | `1` turns on language detection and Urdu switching (and uses nova-3, not Flux) |
 | `CARTESIA_VOLUME` | `1.4` | Voice volume, 0.5 to 2.0 (clips above about 1.5) |
-| `CARTESIA_STREAM_TOKENS` | `0` | Token-by-token text to the voice; no gain measured |
-| `VAD_STOP_SECS` | `0.2` | Silence before a turn can end |
+| `CARTESIA_STREAM_TOKENS` | `0` | Token-by-token text to the voice. Measured: it made the first audio *slower* (0.58 s vs 0.33 s), so leave it off |
+| `VAD_STOP_SECS` | `0.2` | Silence before voice-activity detection ends a turn (nova only) |
 
-## Booking notification emails
+## Latency: what was measured
 
-When Mia books an appointment, the practice gets an email (Resend) with the patient's name, phone, service or reason, date and time,
-and time zone. It is scheduled in the background and never awaited, so it adds no time to the call; if Resend fails, the error is
-logged and the call and the booking carry on. Off unless `RESEND_API_KEY` is set.
+Per-stage times from real Railway calls: speech recognition about 0.33 s, LLM first token about 0.65 s (the largest single piece),
+voice first byte about 0.12 s. Findings from `scripts/latency_benchmark.py` (phone-quality 8 kHz audio, relative numbers):
 
-- `NOTIFY_EMAIL_TO` is the default recipient; a practice can have its own with `notify_email` in its `knowledge_base`.
-- **Resend's sandbox sender (`onboarding@resend.dev`) can only email the address that owns the Resend account.** To email anyone
-  else, verify a domain at resend.com/domains and set `NOTIFY_EMAIL_FROM` to an address on it.
-  Check the setup with `python scripts/real_send_check.py` (sends one clearly labelled test email). The test suite and
-  `scripts/simulate_call.py` never send real email.
-- The email contains patient information. Use a mailbox the practice controls, and check this against your HIPAA obligations
-  (Resend would need a BAA) before using it with real patients.
+- Flux cut the median end-of-speech-to-first-audio time by 0.25-0.3 s on ordinary turns; calendar turns are unchanged, because
+  Pipecat cancels a speculative answer that wants a tool and re-runs it once the turn is confirmed.
+- Removing *all* ~2,400 prompt and tool tokens saves only about 100 ms of LLM first-token time, so the prompt is not worth
+  trimming further at the risk of the dental rules.
+- Bookkeeping writes (appointment rows, urgent-callback flags, cancel and reschedule records) and the Resend email all run behind
+  the reply; the Cal.com request itself (0.8 s to look up, about 2 s to book) is the remaining cost of a tool turn.
+- Sub-800 ms from the end of the caller's speech is not reachable with `gpt-4o-mini` on this stack: LLM first token plus voice
+  first byte alone are about 0.8-0.9 s. Roughly 1.2-1.5 s is realistic for an ordinary turn.

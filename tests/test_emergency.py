@@ -202,3 +202,102 @@ def test_plan_states_the_facts_in_code_and_never_leaves_room_to_invent_a_slot():
         for aid in (True, False):
             _, n = emergency.plan(result, aid, "Apex Dental Care")
             assert "Never send the caller to another dentist" in n
+
+
+def _triage_frame(text, frame_class, result=None, emit=None):
+    from app.emergency import EmergencyTriage
+
+    triage = EmergencyTriage(_Session(result or {"options": [{"slot_id": "x", "spoken": "Wednesday, January 9 at 11 AM"}],
+                                                "window": "within_two_hours"}), _Lang())
+    frame = frame_class(text, "u", "2030-01-01T00:00:00Z")
+    return triage, asyncio.run(triage.triage(frame, emit))
+
+
+def test_an_eager_transcript_triggers_triage_before_the_llm_can_start_speculating():
+    from pipecat.frames.frames import EagerTranscriptionFrame, LLMMessagesAppendFrame, TTSSpeakFrame
+
+    triage, (before, after) = _triage_frame("I just knocked out my front tooth and it really hurts.", EagerTranscriptionFrame)
+    # the note goes in BEFORE the eager frame, so the speculative response is generated with it
+    assert [type(f) for f in before] == [LLMMessagesAppendFrame] and all(isinstance(f, TTSSpeakFrame) for f in after)
+    assert "Do NOT search again" in before[0].messages[0]["content"]
+
+
+def test_triage_runs_once_even_though_flux_sends_an_eager_and_a_final_transcript():
+    from pipecat.frames.frames import EagerTranscriptionFrame, TranscriptionFrame
+
+    triage, (before, after) = _triage_frame("My tooth is swollen and it hurts a lot.", EagerTranscriptionFrame)
+    assert before and after
+    final = TranscriptionFrame("My tooth is swollen and it hurts a lot.", "u", "2030-01-01T00:00:00Z")
+    assert asyncio.run(triage.triage(final)) == ([], [])  # the final transcript of the same turn adds nothing
+
+
+def test_a_final_transcript_alone_still_triggers_triage_for_non_eager_speech_engines():
+    from pipecat.frames.frames import TranscriptionFrame
+
+    triage, (before, after) = _triage_frame("I have severe tooth pain.", TranscriptionFrame)
+    assert before and after
+
+
+def test_airway_in_an_eager_transcript_is_handled_at_once():
+    from pipecat.frames.frames import EagerTranscriptionFrame, TTSSpeakFrame
+
+    triage, (before, after) = _triage_frame("My throat is closing and I can't breathe.", EagerTranscriptionFrame)
+    assert "call 911 right now" in after[0].text and isinstance(after[0], TTSSpeakFrame) and triage._session.flagged
+
+
+def test_with_flux_the_spoken_lines_go_out_before_the_eager_transcript_not_behind_the_models_reply():
+    from pipecat.frames.frames import EagerTranscriptionFrame, LLMMessagesAppendFrame, TTSSpeakFrame
+
+    emitted = []
+
+    async def emit(frame):
+        emitted.append(frame)
+
+    triage, (before, after) = _triage_frame("I just knocked out my front tooth and it really hurts.", EagerTranscriptionFrame, emit=emit)
+    # said immediately and in order: the caring line with first aid, then the opening; nothing is left to send afterwards
+    assert [type(f) for f in emitted] == [TTSSpeakFrame, TTSSpeakFrame] and after == []
+    assert "milk" in emitted[0].text and emitted[1].text == "The earliest opening I have is today at 11 AM."
+    assert all(f.interruptible is False for f in emitted)
+    assert [type(f) for f in before] == [LLMMessagesAppendFrame]  # the note still goes in ahead of the eager transcript
+
+
+def test_the_caring_line_is_said_before_the_calendar_search_finishes():
+    from pipecat.frames.frames import EagerTranscriptionFrame
+
+    from app.emergency import EmergencyTriage
+
+    order = []
+
+    class _SlowSearch(_Session):
+        async def emergency_search(self):
+            order.append("search started")
+            await asyncio.sleep(0.05)
+            order.append("search finished")
+            return {"options": [{"slot_id": "x", "spoken": "Wednesday, January 9 at 11 AM"}], "window": "within_two_hours"}
+
+    async def emit(frame):
+        order.append("said: " + frame.text[:24])
+
+    triage = EmergencyTriage(_SlowSearch({}), _Lang())
+    asyncio.run(triage.triage(EagerTranscriptionFrame("I have severe tooth pain", "u", "2030-01-01T00:00:00Z"), emit))
+    assert order[0].startswith("said: I'm so sorry you're")
+    assert order.index("search finished") < order.index("said: The earliest opening I h")
+
+
+def test_with_flux_the_911_line_is_said_first_of_all():
+    from pipecat.frames.frames import EagerTranscriptionFrame
+
+    from app.emergency import EmergencyTriage
+
+    events = []
+
+    class _Recorder(_Session):
+        async def flag_urgent_callback(self, reason):
+            events.append("callback flagged")
+
+    async def emit(frame):
+        events.append("said: " + frame.text[:12])
+
+    triage = EmergencyTriage(_Recorder({}), _Lang())
+    asyncio.run(triage.triage(EagerTranscriptionFrame("I can't breathe, my throat is closing", "u", "2030-01-01T00:00:00Z"), emit))
+    assert events == ["said: That sounds ", "callback flagged"]

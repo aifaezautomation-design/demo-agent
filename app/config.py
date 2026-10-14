@@ -28,7 +28,7 @@ DEEPGRAM_MODEL = os.getenv("DEEPGRAM_MODEL", "nova-3-general")
 
 OPENAI_API_KEY = _require("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.2"))
+OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))
 
 CARTESIA_API_KEY = _require("CARTESIA_API_KEY")
 CARTESIA_VOICE_ID = _require("CARTESIA_VOICE_ID")
@@ -70,7 +70,7 @@ MULTILINGUAL_ENABLED = os.getenv("MULTILINGUAL_ENABLED", "0") == "1"
 # Speech-to-text engine for English calls. "nova" = Deepgram nova-3 with Pipecat's VAD + Smart Turn deciding when the
 # caller is done. "flux" = Deepgram Flux (English-only), which predicts the end of the turn itself and lets the LLM
 # start answering before the transcript is final.
-DEEPGRAM_STT = os.getenv("DEEPGRAM_STT", "nova")
+DEEPGRAM_STT = os.getenv("DEEPGRAM_STT", "flux")
 
 # Booking notification emails (Resend). Off unless RESEND_API_KEY is set. A tenant can override the recipient with
 # `notify_email` in its knowledge base. Resend only lets an unverified sender (onboarding@resend.dev) email the
@@ -78,3 +78,15 @@ DEEPGRAM_STT = os.getenv("DEEPGRAM_STT", "nova")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 NOTIFY_EMAIL_TO = os.getenv("NOTIFY_EMAIL_TO", "")
 NOTIFY_EMAIL_FROM = os.getenv("NOTIFY_EMAIL_FROM", "Mia Receptionist <onboarding@resend.dev>")
+
+# Reply length bound, in tokens. Real calls average ~30 and peak ~65; a spoken turn is one or two sentences, so this
+# only ever cuts off a runaway answer.
+OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "150"))
+
+# Deepgram Flux turn detection (DEEPGRAM_STT=flux). Flux predicts the end of the caller's turn itself.
+#   eager threshold: how sure it must be to START the LLM early (lower = earlier, more discarded guesses)
+#   eot threshold:   how sure it must be to END the turn
+#   eot timeout:     the longest silence after which the turn ends whatever the confidence (Flux's default is 5 s)
+FLUX_EAGER_EOT_THRESHOLD = float(os.getenv("FLUX_EAGER_EOT_THRESHOLD", "0.5"))
+FLUX_EOT_THRESHOLD = float(os.getenv("FLUX_EOT_THRESHOLD", "0.7"))
+FLUX_EOT_TIMEOUT_MS = int(os.getenv("FLUX_EOT_TIMEOUT_MS", "2000"))
