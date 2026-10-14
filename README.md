@@ -70,14 +70,34 @@ Expect roughly **0.8–1.2 s caller-perceived response time** over the phone net
 
 Transcripts and recordings are PHI. You need BAAs with Telnyx, Deepgram, OpenAI, Cartesia, and Supabase (HIPAA add-on), and Railway's terms need checking. Until those are in place, use demo tenants only.
 
-## Languages and dates
+## How Mia behaves
 
-- **Languages:** English, Spanish, French, German, Portuguese, Italian, Hindi, Urdu. Speech recognition starts in
-  Deepgram nova-3 `multi`, which reports each utterance's language; the voice (Cartesia sonic-3.6, same voice for every
-  language) switches before the LLM replies. Urdu is not in `multi` (it is heard as Hindi), so it runs on a second
-  Deepgram service behind a `ServiceSwitcher`, selected by Urdu vocabulary in the transcript or by the `set_language`
-  tool. Hindi and Urdu speech are the same language to a recognizer: a caller who uses no Urdu-specific words is
-  answered in Hindi until they ask for Urdu. The spoken phrases in `app/language.py` should be reviewed by native speakers.
-  Set `DEEPGRAM_LANGUAGE=en` to turn multilingual recognition off.
-- **Dates:** the model passes the caller's own words ("next thursday", "friday next week", "the 26th") and code resolves
-  them against the practice's clock (`resolve_day` in `app/tools.py`); the model never does calendar arithmetic.
+- **English only, by default.** Speech recognition is Deepgram `nova-3` in English, the voice is Cartesia `sonic-3.6` (the
+  fastest current Cartesia model; `sonic-english` has been shut down and `sonic-2` / `sonic-turbo` stop working on
+  2026-10-20), and none of the multilingual machinery is loaded. `MULTILINGUAL_ENABLED=1` brings it back (language
+  detection, a second Deepgram connection for Urdu, the `set_language` tool, localized spoken phrases; see `app/language.py`).
+- **Dates are resolved in code.** The model passes the caller's own words ("next thursday", "friday next week", "the
+  26th") and `resolve_day` in `app/tools.py` works out the date from the practice's clock. `check_availability` also takes a
+  `preferred_time`, so Mia can say truthfully whether 2 PM is open.
+- **Opening hours are enforced in code.** Cal.com decides what is bookable, and its schedule can disagree with the clinic's
+  real hours (it did). `hours_schedule` in the tenant's `knowledge_base` is checked for every slot, so nothing outside
+  opening hours is ever offered or booked. Keep the Cal.com schedule in line with it too.
+- **Bookings use what the caller said.** `book_appointment` refuses a name or phone number the caller never gave
+  (placeholders like "John Doe" and invented numbers included).
+- **Emergencies are handled by code first (`app/emergency.py`).** Severe pain, swelling, bleeding, a knocked-out or broken
+  tooth, or an abscess: code speaks a caring line (with first aid when it applies) and the 911-if-breathing line, finds the
+  soonest same-day slot, states it, and hands the LLM only the job of asking for a name and booking. Mia never sends the
+  caller to another dentist, urgent care, or the ER. The one exception is trouble breathing or swallowing: code tells
+  the caller to call 911 and flags an urgent callback. Phrases the detector misses still go to the LLM and its prompt rules.
+- **The clinic's knowledge lives in the database** (`clients.knowledge_base`): address, hours, dentists, services and prices,
+  insurance. `data/apex_dental_care.json` is the Apex Dental Care record used for the schema seed and tests.
+
+## Settings you may want to change (Railway variables or `.env`)
+
+| Variable | Default | What it does |
+|---|---|---|
+| `MULTILINGUAL_ENABLED` | `0` | `1` turns on language detection and Urdu switching |
+| `DEEPGRAM_STT` | `nova` | `flux` uses Deepgram Flux (English), which can start the LLM before the transcript is final: about 0.3 s faster in a local A/B, not yet tried on real phone audio |
+| `CARTESIA_VOLUME` | `1.4` | Voice volume, 0.5 to 2.0 (clips above about 1.5) |
+| `CARTESIA_STREAM_TOKENS` | `0` | Token-by-token text to the voice; no gain measured |
+| `VAD_STOP_SECS` | `0.2` | Silence before a turn can end |

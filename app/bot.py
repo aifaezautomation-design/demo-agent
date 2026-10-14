@@ -28,16 +28,17 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.runner.types import TelnyxCallData
 from pipecat.serializers.telnyx import TelnyxFrameSerializer
 from pipecat.services.cartesia.tts import CartesiaTTSService, GenerationConfig
+from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.tts_service import TextAggregationMode
-from pipecat.transcriptions.language import Language
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
 from pipecat.workers.runner import WorkerRunner
 
 from app import config, db
 from app import language as language_module
 from app.db import Tenant
+from app.emergency import EmergencyTriage
 from app.language import LanguageDetector
 from app.prompts import build_system_prompt
 from app.tools import CallSession
@@ -67,7 +68,17 @@ def _greeting(tenant: Tenant) -> str:
     return f"Thanks for calling {tenant.name}, this is Mia.{disclosure} How can I help you today?"
 
 
-def build_stt(language: str) -> DeepgramSTTService:
+def build_stt(language: str):
+    if config.DEEPGRAM_STT == "flux" and language == "en" and not config.MULTILINGUAL_ENABLED:
+        return DeepgramFluxSTTService(
+            api_key=config.DEEPGRAM_API_KEY,
+            enable_eager_end_of_turn=True,
+            settings=DeepgramFluxSTTService.Settings(model="flux-general-en"),
+        )
+    return _build_nova_stt(language)
+
+
+def _build_nova_stt(language: str) -> DeepgramSTTService:
     return DeepgramSTTService(
         api_key=config.DEEPGRAM_API_KEY,
         settings=DeepgramSTTService.Settings(
@@ -153,9 +164,13 @@ async def run_call(
 
     stt, llm, tts = build_services()
     session.register(llm)
-    stt_urdu = build_stt("ur")
-    stt_switcher = ServiceSwitcher(services=[stt, stt_urdu], strategy_type=ServiceSwitcherStrategyManual)
-    session.language_state.stt_services = {session.language_state.stt: stt, "ur": stt_urdu}
+    stt_node, language_detector = stt, None
+    if config.MULTILINGUAL_ENABLED:
+        # Urdu is outside Deepgram's multilingual mode, so it gets its own service behind a switcher.
+        stt_urdu = build_stt("ur")
+        stt_node = ServiceSwitcher(services=[stt, stt_urdu], strategy_type=ServiceSwitcherStrategyManual)
+        session.language_state.stt_services = {session.language_state.stt: stt, "ur": stt_urdu}
+        language_detector = LanguageDetector(session.language_state, lambda frame: worker.queue_frame(frame))
     greeting = _greeting(tenant)
     context = LLMContext(
         messages=[{"role": "system", "content": build_system_prompt(tenant, caller_phone or "")}],
@@ -175,8 +190,9 @@ async def run_call(
     pipeline = Pipeline(
         [
             transport.input(),
-            stt_switcher,
-            LanguageDetector(session.language_state, lambda frame: worker.queue_frame(frame)),
+            stt_node,
+            *([language_detector] if language_detector else []),
+            EmergencyTriage(session, session.language_state),
             aggregators.user(),
             llm,
             spoke,
@@ -201,7 +217,8 @@ async def run_call(
         log.info(f"language set to {code}")
         await worker.queue_frames(language_module.switch_frames(session.language_state, code))
 
-    session.apply_language = apply_language
+    if config.MULTILINGUAL_ENABLED:
+        session.apply_language = apply_language
 
     @llm.event_handler("on_function_calls_started")
     async def on_tool_started(service, function_calls):
@@ -237,6 +254,7 @@ async def run_call(
     @aggregators.user().event_handler("on_user_turn_stopped")
     async def on_user_turn(_agg, _strategy, message):
         if message.content:
+            session.note_heard(message.content)
             transcript.append(session.transcript_entry("patient", message.content))
 
     @aggregators.assistant().event_handler("on_assistant_turn_stopped")

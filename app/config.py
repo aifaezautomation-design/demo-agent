@@ -61,4 +61,13 @@ CARTESIA_VOLUME = min(max(float(os.getenv("CARTESIA_VOLUME", "1.4")), 0.5), 2.0)
 # Speech-to-text language. "multi" = Deepgram nova-3 multilingual (English, Spanish, French, German,
 # Portuguese, Italian, Hindi, ...) with per-utterance language detection; Urdu is switched in by the
 # set_language tool. Set to "en" to run English-only.
-DEEPGRAM_LANGUAGE = os.getenv("DEEPGRAM_LANGUAGE", "multi")
+DEEPGRAM_LANGUAGE = os.getenv("DEEPGRAM_LANGUAGE", "multi" if os.getenv("MULTILINGUAL_ENABLED") == "1" else "en")
+
+# English only by default: no language detection, no second speech-to-text connection, and no language rules or
+# set_language tool in the prompt. "1" turns the multilingual path back on (see app/language.py and the README).
+MULTILINGUAL_ENABLED = os.getenv("MULTILINGUAL_ENABLED", "0") == "1"
+
+# Speech-to-text engine for English calls. "nova" = Deepgram nova-3 with Pipecat's VAD + Smart Turn deciding when the
+# caller is done. "flux" = Deepgram Flux (English-only), which predicts the end of the turn itself and lets the LLM
+# start answering before the transcript is final.
+DEEPGRAM_STT = os.getenv("DEEPGRAM_STT", "nova")

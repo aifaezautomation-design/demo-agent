@@ -7,7 +7,6 @@ ngrok URL can never reach it (it would spend your API credits and make real
 bookings).
 """
 
-import asyncio
 import os
 import uuid
 

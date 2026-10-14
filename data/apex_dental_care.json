@@ -1,0 +1,30 @@
+{
+  "name": "Apex Dental Care",
+  "knowledge_base": {
+    "address": "742 Evergreen Terrace, Suite 100, Austin, TX 78701",
+    "hours": "Monday to Friday 8:00 AM to 6:00 PM, Saturday 9:00 AM to 2:00 PM, Sunday closed (Central Time)",
+    "hours_schedule": {
+      "mon": ["08:00", "18:00"],
+      "tue": ["08:00", "18:00"],
+      "wed": ["08:00", "18:00"],
+      "thu": ["08:00", "18:00"],
+      "fri": ["08:00", "18:00"],
+      "sat": ["09:00", "14:00"],
+      "sun": null
+    },
+    "appointment_minutes": 60,
+    "team": [
+      {"name": "Dr. Sarah Jenkins", "role": "Lead Dentist, specialist in restorative and cosmetic dentistry (crowns, fillings, whitening)"},
+      {"name": "Dr. Michael Vance", "role": "Orthodontist and general dentist (braces, alignment, general care)"}
+    ],
+    "insurances": ["Delta Dental", "Cigna", "MetLife", "Aetna", "Guardian", "Premier Access"],
+    "services": [
+      {"name": "Routine cleaning and exam, with X-rays", "price": "$150–$250", "minutes": 45},
+      {"name": "Fillings", "price": "$180–$350", "minutes": 45},
+      {"name": "Root canals", "price": "$900–$1,400", "minutes": 60},
+      {"name": "Crowns", "price": "$1,100–$1,800", "minutes": 60},
+      {"name": "Teeth whitening", "price": null, "minutes": null},
+      {"name": "Emergency tooth pain care and triage", "price": "$100 diagnostic fee", "minutes": 30}
+    ]
+  }
+}

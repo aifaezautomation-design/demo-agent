@@ -3,6 +3,7 @@ guardrails in code: only slots offered this call can be booked, and only
 appointments looked up this call can be changed."""
 
 import asyncio
+import difflib
 import re
 import time as time_module
 from datetime import date, datetime, time, timedelta, timezone
@@ -15,7 +16,7 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import EndWorkerFrame, FunctionCallResultProperties, TTSSpeakFrame
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 
-from app import db
+from app import config, db
 from app import language as language_module
 from app.calcom import CalCom, CalComError
 from app.db import Tenant
@@ -25,6 +26,10 @@ _SEARCH_DAYS = 7
 _EMERGENCY_WINDOW = timedelta(hours=2)
 _EMERGENCY_SEARCH = timedelta(hours=48)
 _MIN_LEAD_TIME = timedelta(minutes=30)
+
+
+def phone_matches_caller_id(phone: str | None, caller: str | None) -> bool:
+    return bool(phone and caller and _digits(phone)[-10:] == _digits(caller)[-10:])
 
 
 def normalize_phone(raw: str | None) -> str | None:
@@ -139,6 +144,38 @@ def parse_time_pref(text: str | None) -> time | None:
     return time(hour, minute) if hour < 24 and minute < 60 else None
 
 
+_DAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def slot_in_hours(kb: dict, slot_local: datetime) -> bool:
+    """True when an appointment starting at `slot_local` (practice time) fits inside the practice's opening hours.
+
+    Cal.com decides what is bookable, and its schedule can disagree with the practice's real hours (it did:
+    9-8 Mon-Sat in Eastern time against 8-6 / 9-2 in Central). This check makes sure a slot outside the hours
+    in the knowledge base is never offered or booked. Without `hours_schedule` in the knowledge base it allows
+    everything, so tenants that haven't configured it behave as before.
+    """
+    schedule = kb.get("hours_schedule")
+    if not schedule:
+        return True
+    window = schedule.get(_DAY_KEYS[slot_local.weekday()])
+    if not window:
+        return False  # closed that day
+    opens, closes = (time.fromisoformat(t) for t in window)
+    end = slot_local + timedelta(minutes=int(kb.get("appointment_minutes", 60)))
+    return opens <= slot_local.time() and end.date() == slot_local.date() and end.time() <= closes
+
+
+_PLACEHOLDER_NAMES = {
+    "unknown", "caller", "patient", "anonymous", "unnamed", "na", "n/a", "none", "test", "name", "john doe", "jane doe",
+    "new patient", "the caller", "not provided", "no name",
+}
+
+
+def _digits(text: str) -> str:
+    return "".join(ch for ch in text if ch.isdigit())
+
+
 def spoken_day(d: date) -> str:
     return f"{d:%A, %B} {d.day}"
 
@@ -173,6 +210,8 @@ class CallSession:
         self.calcom = CalCom(tenant.cal_com_api_key) if tenant.cal_com_api_key else None
         self.offered_slots: dict[str, datetime] = {}
         self.found_appointments: set[str] = set()
+        # Everything the caller has said, so a booking can be checked against it (see _name_is_from_caller).
+        self.heard: list[str] = []
         self.appointment_booked = False
 
     # ------------------------------------------------------------------ setup
@@ -247,12 +286,7 @@ class CallSession:
                     properties={"reason": {"type": "string", "description": "Short emergency description."}},
                     required=["reason"],
                 ),
-                FunctionSchema(
-                    name="set_language",
-                    description="Switch the voice and speech recognition to the caller's language. Needed for Urdu; other languages switch automatically.",
-                    properties={"language": {"type": "string", "enum": list(language_module.SUPPORTED)}},
-                    required=["language"],
-                ),
+                *self._language_tool(),
                 FunctionSchema(
                     name="end_call",
                     description="Say goodbye and hang up.",
@@ -262,6 +296,18 @@ class CallSession:
             ]
         )
 
+    def _language_tool(self) -> list[FunctionSchema]:
+        if not config.MULTILINGUAL_ENABLED:
+            return []
+        return [
+            FunctionSchema(
+                name="set_language",
+                description="Switch the voice and speech recognition to the caller's language. Needed for Urdu; other languages switch automatically.",
+                properties={"language": {"type": "string", "enum": list(language_module.SUPPORTED)}},
+                required=["language"],
+            )
+        ]
+
     def register(self, llm: LLMService) -> None:
         handlers = {
             "check_availability": self.check_availability,
@@ -270,8 +316,9 @@ class CallSession:
             "reschedule_appointment": self.reschedule_appointment,
             "cancel_appointment": self.cancel_appointment,
             "flag_urgent_callback": self.flag_urgent_callback,
-            "set_language": self.set_language,
         }
+        if config.MULTILINGUAL_ENABLED:
+            handlers["set_language"] = self.set_language
         for name, handler in handlers.items():
             llm.register_function(name, self._wrap(name, handler), timeout_secs=12)
         llm.register_function("end_call", self.end_call)
@@ -322,6 +369,28 @@ class CallSession:
         if self._pending:
             await asyncio.gather(*list(self._pending), return_exceptions=True)
 
+    def note_heard(self, text: str) -> None:
+        self.heard.append(text)
+
+    def _name_is_from_caller(self, name: str) -> bool:
+        """The model must not book under a name the caller never gave (it did, in testing: it called
+        book_appointment right after 'I knocked out my tooth', before asking who was calling)."""
+        if (name or "").strip().lower() in _PLACEHOLDER_NAMES:
+            return False
+        if config.MULTILINGUAL_ENABLED:
+            return True  # transcripts may be in another script, so a letter-by-letter check would reject real names
+        heard_words = [w.lower().strip("'") for w in " ".join(self.heard).replace(",", " ").replace(".", " ").split()]
+        tokens = [t.strip("'").lower() for t in name.replace("-", " ").split() if len(t.strip("'")) >= 2]
+        if not tokens:
+            return False
+        return all(difflib.get_close_matches(tok, heard_words, n=1, cutoff=0.75) for tok in tokens)
+
+    def _phone_is_from_caller(self, phone: str) -> bool:
+        number = _digits(phone)[-10:]
+        if len(number) < 10:
+            return False
+        return phone_matches_caller_id(phone, self.caller_phone) or number in _digits(" ".join(self.heard))
+
     def _require_calendar(self) -> CalCom:
         if not self.calcom:
             raise CalComError("tenant has no Cal.com API key configured")
@@ -344,7 +413,7 @@ class CallSession:
         start = max(datetime.combine(day, time.min, self.tz), now + _MIN_LEAD_TIME)
         end = datetime.combine(day + timedelta(days=_SEARCH_DAYS), time.min, self.tz)
         slots = await calcom.get_slots(self.tenant.cal_com_event_type_id, start, end, self.tenant.timezone)
-        slots = [s.astimezone(self.tz) for s in slots]
+        slots = self._open_hours(s.astimezone(self.tz) for s in slots)
         if wanted is None:  # a named time beats a vague part of the day
             slots = [s for s in slots if _matches_time_of_day(s, time_of_day)]
 
@@ -370,6 +439,10 @@ class CallSession:
             )
         return result
 
+    async def emergency_search(self) -> dict:
+        """The same-day emergency search, callable without the LLM (used by app/emergency.py)."""
+        return await self._emergency_slots(self._require_calendar(), datetime.now(self.tz))
+
     async def _emergency_slots(self, calcom: CalCom, now: datetime) -> dict:
         """Soonest slots for an emergency: within 2 hours, else later today, else the next two days.
 
@@ -378,7 +451,7 @@ class CallSession:
         """
         event_type = self.tenant.emergency_event_type_id or self.tenant.cal_com_event_type_id
         slots = await calcom.get_slots(event_type, now, now + _EMERGENCY_SEARCH, self.tenant.timezone)
-        slots = [s.astimezone(self.tz) for s in slots if s >= now]
+        slots = self._open_hours(s.astimezone(self.tz) for s in slots if s >= now)
 
         within_two_hours = [s for s in slots if s <= now + _EMERGENCY_WINDOW]
         later_today = [s for s in slots if s.date() == now.date()]
@@ -404,7 +477,11 @@ class CallSession:
             )
         return result
 
+    def _open_hours(self, slots) -> list[datetime]:
+        return [s for s in slots if slot_in_hours(self.tenant.knowledge_base, s)]
+
     def _offer(self, slots: list[datetime], none_note: str = "no_slots") -> dict:
+        slots = self._open_hours(slots)  # belt and braces: nothing outside opening hours is ever offered
         if not slots:
             return {"options": [], "note": none_note}
         options = []
@@ -428,9 +505,13 @@ class CallSession:
         slot = self.offered_slots.get(slot_id)
         if slot is None:
             return {"error": "unknown_slot", "say": "Call check_availability and offer real options first."}
+        if not self._name_is_from_caller(patient_name):
+            return {"error": "name_not_confirmed", "say": "Ask the caller for their full name, then book. Never guess or invent a name."}
         phone = normalize_phone(phone_number) or self.caller_phone
         if not phone:
             return {"error": "missing_phone", "say": "Ask for the best contact number."}
+        if not self._phone_is_from_caller(phone):
+            return {"error": "phone_not_confirmed", "say": "Offer the caller ID as their number, or ask for the best number. Never guess one."}
 
         event_type = (
             self.tenant.emergency_event_type_id if is_emergency and self.tenant.emergency_event_type_id

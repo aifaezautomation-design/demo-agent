@@ -206,6 +206,7 @@ async def scripted_run(args) -> int:
         if not options:
             r.skip("no slots to book")
         else:
+            session.note_heard("My name is Simulation Test Patient")  # bookings must use a name the caller gave
             result = await session.book_appointment(
                 patient_name="Simulation Test Patient",
                 phone_number=caller,
@@ -265,6 +266,7 @@ async def scripted_run(args) -> int:
                 if slots:
                     r.ok(f"emergency slot ({result.get('window')}): {slots[0]['spoken']}")
                     if args.book_emergency:
+                        session.note_heard("This is Simulation Emergency Patient")
                         booked = await session.book_appointment(
                             "Simulation Emergency Patient", caller, "Emergency: knocked-out tooth",
                             False, True, slots[0]["slot_id"])

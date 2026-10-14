@@ -10,7 +10,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
-from app import config, db, server, tools
+from app import config, server, tools
 from app.calcom import CalComError
 from app.db import Tenant
 from app.prompts import build_system_prompt
@@ -120,7 +120,8 @@ def test_availability_filters_by_time_of_day(session):
 
 
 def test_booking_rejects_slot_that_was_never_offered(session):
-    result = run(session.book_appointment("Jane Doe", "5125550199", "Cleaning", True, False, "2030-01-01T15:00:00Z"))
+    session.note_heard("my name is Jane Wilson")
+    result = run(session.book_appointment("Jane Wilson", "5125550199", "Cleaning", True, False, "2030-01-01T15:00:00Z"))
     assert result["error"] == "unknown_slot"
     assert session.calcom.bookings == []
 
@@ -128,7 +129,8 @@ def test_booking_rejects_slot_that_was_never_offered(session):
 def test_booking_offered_slot_records_appointment(session):
     async def go():
         option = (await session.check_availability(session.tomorrow.date().isoformat(), "morning"))["options"][0]
-        result = await session.book_appointment("Jane Doe", "512-555-0199", "Cleaning", True, False, option["slot_id"])
+        session.note_heard("My name is Jane Wilson")
+        result = await session.book_appointment("Jane Wilson", "512-555-0199", "Cleaning", True, False, option["slot_id"])
         # Our own record is written behind the reply; flush() is what lookups and call-end wait on.
         await session.flush()
         return result
@@ -143,7 +145,8 @@ def test_booking_offered_slot_records_appointment(session):
 def test_taken_slot_is_reported_and_forgotten(session):
     option = run(session.check_availability(session.tomorrow.date().isoformat(), "any"))["options"][0]
     session.calcom.fail_booking = True
-    result = run(session.book_appointment("Jane", "5125550199", "Cleaning", False, False, option["slot_id"]))
+    session.note_heard("Jane Wilson")
+    result = run(session.book_appointment("Jane Wilson", "5125550199", "Cleaning", False, False, option["slot_id"]))
     assert result["error"] == "slot_no_longer_available"
     assert option["slot_id"] not in session.offered_slots
 
@@ -520,3 +523,119 @@ def test_stt_update_enters_at_pipeline_start_but_voice_update_goes_downstream():
 
 async def _collect(bucket, frame):
     bucket.append(frame)
+
+
+# --- English-only by default, multilingual behind a flag ---------------------------------------
+
+def _tool_names(session):
+    return [t.name for t in session.tools_schema().standard_tools]
+
+
+def test_english_only_by_default_has_no_multilingual_overhead(session):
+    assert config.MULTILINGUAL_ENABLED is False and config.DEEPGRAM_LANGUAGE == "en"
+    assert "set_language" not in _tool_names(session)
+    prompt = build_system_prompt(make_tenant(), "+15125550101")
+    assert "You speak English only" in prompt
+    assert "Detect the caller's language" not in prompt and "Urdu" not in prompt and "Devanagari" not in prompt
+
+
+def test_multilingual_flag_restores_language_rules_and_tool(session, monkeypatch):
+    monkeypatch.setattr(config, "MULTILINGUAL_ENABLED", True)
+    assert "set_language" in _tool_names(session)
+    prompt = build_system_prompt(make_tenant(), "+15125550101")
+    assert "Detect the caller's language" in prompt and "You speak English only" not in prompt
+
+
+# --- opening hours guard and the clinic knowledge base ---------------------------------------------------------
+
+import json as _json  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+APEX_KB = _json.loads((_Path(__file__).parent.parent / "data" / "apex_dental_care.json").read_text(encoding="utf-8"))["knowledge_base"]
+
+
+def _at(y, m, d, hh, mm=0):
+    return datetime(y, m, d, hh, mm, tzinfo=TZ)
+
+
+@pytest.mark.parametrize("slot,expected", [
+    (_at(2030, 1, 9, 8, 0), True),     # Wednesday opening time
+    (_at(2030, 1, 9, 7, 0), False),    # before opening
+    (_at(2030, 1, 9, 17, 0), True),    # last 60-minute slot on a weekday: ends exactly at 6 PM
+    (_at(2030, 1, 9, 17, 30), False),  # would run past 6 PM
+    (_at(2030, 1, 9, 18, 0), False),   # after closing (Cal.com's 9-8 Eastern schedule offered these)
+    (_at(2030, 1, 12, 9, 0), True),    # Saturday opening
+    (_at(2030, 1, 12, 13, 0), True),   # last Saturday slot: ends at 2 PM
+    (_at(2030, 1, 12, 14, 0), False),  # Saturday afternoon is closed
+    (_at(2030, 1, 13, 10, 0), False),  # Sunday is closed
+])
+def test_slot_in_hours(slot, expected):
+    assert tools.slot_in_hours(APEX_KB, slot) is expected
+
+
+def test_slot_in_hours_allows_everything_without_a_schedule():
+    assert tools.slot_in_hours({}, _at(2030, 1, 13, 3, 0)) is True
+
+
+def test_slots_outside_opening_hours_are_never_offered(session):
+    session.tenant.knowledge_base = APEX_KB
+    day = _at(2030, 1, 9, 0)  # a Wednesday
+    session.calcom.slots = [day.replace(hour=h) for h in (7, 8, 12, 17, 18, 19)]
+    options = session._offer(session._open_hours(session.calcom.slots))["options"]
+    assert [o["spoken"].split(" at ")[1] for o in options] == ["8 AM", "12 PM", "5 PM"]
+
+
+def test_an_after_hours_emergency_is_flagged_not_booked(session, monkeypatch):
+    session.tenant.knowledge_base = APEX_KB
+    flagged = []
+
+    async def flag(call_id, reason):
+        flagged.append(reason)
+
+    monkeypatch.setattr(tools.db, "flag_urgent_callback", flag)
+    now = _at(2030, 1, 9, 19, 0)  # 7 PM Wednesday: closed. Cal.com's own schedule would still offer 7:30 PM.
+    session.calcom.slots = [now + timedelta(minutes=30)]
+    result = run(session._emergency_slots(session.calcom, now))
+    assert result["options"] == [] and result["urgent_callback"] == "flagged" and flagged
+
+
+def test_prompt_carries_the_clinic_knowledge():
+    prompt = build_system_prompt(make_tenant(name="Apex Dental Care", knowledge_base=APEX_KB), "+15125550101")
+    for fact in ["Apex Dental Care", "742 Evergreen Terrace, Suite 100", "Monday to Friday 8:00 AM to 6:00 PM",
+                 "Saturday 9:00 AM to 2:00 PM", "Sunday closed", "Dr. Sarah Jenkins", "Dr. Michael Vance",
+                 "Orthodontist", "restorative and cosmetic", "Teeth whitening: price confirmed by the team",
+                 "Emergency tooth pain care", "never promise a particular dentist"]:
+        assert fact in prompt, fact
+
+
+
+# --- bookings must use what the caller actually said -------------------------------------------------------------
+
+def _book(session, name, phone="5125550199"):
+    option = run(session.check_availability(session.tomorrow.date().isoformat(), "any"))["options"][0]
+    return run(session.book_appointment(name, phone, "Cleaning", True, False, option["slot_id"]))
+
+
+def test_booking_is_refused_when_the_caller_never_gave_a_name(session):
+    session.note_heard("I just knocked out my front tooth")
+    result = _book(session, "Alex Morgan")  # the model invented it
+    assert result["error"] == "name_not_confirmed" and session.calcom.bookings == []
+
+
+@pytest.mark.parametrize("placeholder", ["Unknown", "Patient", "John Doe", "caller", "N/A", ""])
+def test_placeholder_names_are_refused_even_if_said(session, placeholder):
+    session.note_heard("unknown patient john doe caller")
+    assert _book(session, placeholder)["error"] == "name_not_confirmed"
+
+
+def test_a_name_the_caller_said_is_accepted_even_if_spelled_slightly_differently(session):
+    session.note_heard("my name is Jonathon Whitfeld")        # as the speech recognizer wrote it
+    assert _book(session, "Jonathan Whitfield")["status"] == "booked"
+
+
+def test_the_caller_id_is_an_acceptable_phone_number_but_an_invented_one_is_not(session):
+    session.note_heard("this is Maria Lopez")
+    assert _book(session, "Maria Lopez", "(512) 555-0199")["status"] == "booked"      # matches the caller ID
+    assert _book(session, "Maria Lopez", "415 555 0123")["error"] == "phone_not_confirmed"  # never mentioned
+    session.note_heard("my number is 415-555-0123")
+    assert _book(session, "Maria Lopez", "415 555 0123")["status"] == "booked"       # the caller said it
