@@ -217,31 +217,31 @@ values (
     true,
     '{
   "address": "742 Evergreen Terrace, Suite 100, Austin, TX 78701",
-  "hours": "Monday to Friday 8:00 AM to 6:00 PM, Saturday 9:00 AM to 2:00 PM, Sunday closed (Central Time)",
+  "hours": "Monday to Saturday 8:00 AM to 7:00 PM Central Time (9:00 AM to 8:00 PM Eastern), Sunday closed",
   "hours_schedule": {
     "mon": [
       "08:00",
-      "18:00"
+      "19:00"
     ],
     "tue": [
       "08:00",
-      "18:00"
+      "19:00"
     ],
     "wed": [
       "08:00",
-      "18:00"
+      "19:00"
     ],
     "thu": [
       "08:00",
-      "18:00"
+      "19:00"
     ],
     "fri": [
       "08:00",
-      "18:00"
+      "19:00"
     ],
     "sat": [
-      "09:00",
-      "14:00"
+      "08:00",
+      "19:00"
     ],
     "sun": null
   },

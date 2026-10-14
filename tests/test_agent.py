@@ -559,14 +559,15 @@ def _at(y, m, d, hh, mm=0):
 
 
 @pytest.mark.parametrize("slot,expected", [
-    (_at(2030, 1, 9, 8, 0), True),     # Wednesday opening time
-    (_at(2030, 1, 9, 7, 0), False),    # before opening
-    (_at(2030, 1, 9, 17, 0), True),    # last 60-minute slot on a weekday: ends exactly at 6 PM
-    (_at(2030, 1, 9, 17, 30), False),  # would run past 6 PM
-    (_at(2030, 1, 9, 18, 0), False),   # after closing (Cal.com's 9-8 Eastern schedule offered these)
-    (_at(2030, 1, 12, 9, 0), True),    # Saturday opening
-    (_at(2030, 1, 12, 13, 0), True),   # last Saturday slot: ends at 2 PM
-    (_at(2030, 1, 12, 14, 0), False),  # Saturday afternoon is closed
+    # The Cal.com schedule is Mon-Sat 9 AM-8 PM Eastern, which is 8 AM-7 PM Central (the practice's time zone).
+    (_at(2030, 1, 9, 8, 0), True),     # Wednesday opening time (9 AM Eastern)
+    (_at(2030, 1, 9, 7, 0), False),    # before opening (8 AM Eastern)
+    (_at(2030, 1, 9, 18, 0), True),    # last 60-minute slot on a weekday: ends exactly at 7 PM (8 PM Eastern)
+    (_at(2030, 1, 9, 18, 30), False),  # would run past 7 PM
+    (_at(2030, 1, 9, 19, 0), False),   # after closing
+    (_at(2030, 1, 12, 8, 0), True),    # Saturday opens at the same time as weekdays
+    (_at(2030, 1, 12, 18, 0), True),   # Saturday's last slot is the same as weekdays
+    (_at(2030, 1, 12, 19, 0), False),  # Saturday evening is closed
     (_at(2030, 1, 13, 10, 0), False),  # Sunday is closed
 ])
 def test_slot_in_hours(slot, expected):
@@ -580,9 +581,9 @@ def test_slot_in_hours_allows_everything_without_a_schedule():
 def test_slots_outside_opening_hours_are_never_offered(session):
     session.tenant.knowledge_base = APEX_KB
     day = _at(2030, 1, 9, 0)  # a Wednesday
-    session.calcom.slots = [day.replace(hour=h) for h in (7, 8, 12, 17, 18, 19)]
+    session.calcom.slots = [day.replace(hour=h) for h in (7, 8, 12, 18, 19, 20)]
     options = session._offer(session._open_hours(session.calcom.slots))["options"]
-    assert [o["spoken"].split(" at ")[1] for o in options] == ["8 AM", "12 PM", "5 PM"]
+    assert [o["spoken"].split(" at ")[1] for o in options] == ["8 AM", "12 PM", "6 PM"]
 
 
 def test_an_after_hours_emergency_is_flagged_not_booked(session, monkeypatch):
@@ -593,7 +594,7 @@ def test_an_after_hours_emergency_is_flagged_not_booked(session, monkeypatch):
         flagged.append(reason)
 
     monkeypatch.setattr(tools.db, "flag_urgent_callback", flag)
-    now = _at(2030, 1, 9, 19, 0)  # 7 PM Wednesday: closed. Cal.com's own schedule would still offer 7:30 PM.
+    now = _at(2030, 1, 9, 19, 30)  # 7:30 PM Wednesday: closed. A calendar that offered 8 PM would still not be booked.
     session.calcom.slots = [now + timedelta(minutes=30)]
     result = run(session._emergency_slots(session.calcom, now))
     assert result["options"] == [] and result["urgent_callback"] == "flagged" and flagged
@@ -601,8 +602,8 @@ def test_an_after_hours_emergency_is_flagged_not_booked(session, monkeypatch):
 
 def test_prompt_carries_the_clinic_knowledge():
     prompt = build_system_prompt(make_tenant(name="Apex Dental Care", knowledge_base=APEX_KB), "+15125550101")
-    for fact in ["Apex Dental Care", "742 Evergreen Terrace, Suite 100", "Monday to Friday 8:00 AM to 6:00 PM",
-                 "Saturday 9:00 AM to 2:00 PM", "Sunday closed", "Dr. Sarah Jenkins", "Dr. Michael Vance",
+    for fact in ["Apex Dental Care", "742 Evergreen Terrace, Suite 100", "Monday to Saturday 8:00 AM to 7:00 PM Central Time",
+                 "9:00 AM to 8:00 PM Eastern", "Sunday closed", "Dr. Sarah Jenkins", "Dr. Michael Vance",
                  "Orthodontist", "restorative and cosmetic", "Teeth whitening: price confirmed by the team",
                  "Emergency tooth pain care", "never promise a particular dentist"]:
         assert fact in prompt, fact
@@ -639,3 +640,20 @@ def test_the_caller_id_is_an_acceptable_phone_number_but_an_invented_one_is_not(
     assert _book(session, "Maria Lopez", "415 555 0123")["error"] == "phone_not_confirmed"  # never mentioned
     session.note_heard("my number is 415-555-0123")
     assert _book(session, "Maria Lopez", "415 555 0123")["status"] == "booked"       # the caller said it
+
+
+def test_guard_matches_the_calcom_schedule_exactly_in_every_season():
+    """Cal.com's schedule is Mon-Sat 9 AM-8 PM Eastern. The guard (stored in Central) must accept exactly the
+    60-minute slots that schedule can produce, and nothing else: checked every half hour across a whole year,
+    including both daylight-saving changes, which move Eastern and Central together."""
+    eastern = ZoneInfo("America/New_York")
+    mismatches = []
+    moment = datetime(2030, 1, 1, 0, 0, tzinfo=TZ)
+    while moment.year == 2030:
+        e = moment.astimezone(eastern)
+        cal_offers = e.weekday() <= 5 and dtime(9, 0) <= e.time() and (e + timedelta(minutes=60)).time() <= dtime(20, 0) \
+            and (e + timedelta(minutes=60)).date() == e.date()
+        if tools.slot_in_hours(APEX_KB, moment) != cal_offers:
+            mismatches.append(moment.isoformat())
+        moment += timedelta(minutes=30)
+    assert not mismatches, mismatches[:5]
