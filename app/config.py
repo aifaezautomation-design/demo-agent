@@ -57,3 +57,8 @@ VAD_STOP_SECS = float(os.getenv("VAD_STOP_SECS", "0.2"))
 # Cartesia volume multiplier (0.5-2.0, 1.0 = normal). The voice already peaks near full scale,
 # so above ~1.5 speech starts to clip and sound distorted: 1.25 -> 0.1%, 1.5 -> 0.8%, 2.0 -> 3.6%.
 CARTESIA_VOLUME = min(max(float(os.getenv("CARTESIA_VOLUME", "1.4")), 0.5), 2.0)
+
+# Speech-to-text language. "multi" = Deepgram nova-3 multilingual (English, Spanish, French, German,
+# Portuguese, Italian, Hindi, ...) with per-utterance language detection; Urdu is switched in by the
+# set_language tool. Set to "en" to run English-only.
+DEEPGRAM_LANGUAGE = os.getenv("DEEPGRAM_LANGUAGE", "multi")

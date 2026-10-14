@@ -5,7 +5,7 @@ appointments looked up this call can be changed."""
 import asyncio
 import re
 import time as time_module
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -16,6 +16,7 @@ from pipecat.frames.frames import EndWorkerFrame, FunctionCallResultProperties, 
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 
 from app import db
+from app import language as language_module
 from app.calcom import CalCom, CalComError
 from app.db import Tenant
 
@@ -44,6 +45,104 @@ def spoken_time(dt: datetime) -> str:
     return f"{dt:%A, %B} {dt.day} at {hour}{minutes} {'AM' if dt.hour < 12 else 'PM'}"
 
 
+_WEEKDAYS = {
+    "monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "tues": 1, "wednesday": 2, "wed": 2,
+    "thursday": 3, "thu": 3, "thur": 3, "thurs": 3, "friday": 4, "fri": 4, "saturday": 5, "sat": 5,
+    "sunday": 6, "sun": 6,
+}
+
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october",
+     "november", "december"], 1)}
+_MONTHS.update({m[:3]: i for m, i in list(_MONTHS.items())} | {"sept": 9})
+_NUMBER_WORDS = {"a": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8}
+
+
+def _add_months_day(today: date, day: int, month: int | None) -> date | None:
+    """The next occurrence of `day` (of `month`, or of this/next month when none is given)."""
+    for offset in range(0, 14 if month is None else 2):
+        if month is None:
+            y, m = today.year + (today.month - 1 + offset) // 12, (today.month - 1 + offset) % 12 + 1
+        else:
+            y, m = today.year + offset, month
+        try:
+            candidate = date(y, m, day)
+        except ValueError:
+            continue
+        if candidate >= today:
+            return candidate
+    return None
+
+
+def resolve_day(text: str | None, today: date) -> tuple[date, bool]:
+    """Turns what the LLM passes for the day into a real date, in code, because models are bad at
+    calendar arithmetic ("next week Thursday" used to become a Tuesday).
+
+    Accepts YYYY-MM-DD, today, tomorrow, a weekday ("friday", "this friday": the coming one),
+    "next <weekday>" (that weekday in next week, weeks starting Monday), "next week" (its Monday),
+    "the week after next [weekday]", "in N days/weeks", and calendar dates ("the 26th", "october 26").
+    Returns (date, understood).
+    """
+    s = (text or "").strip().lower().replace(",", " ")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        try:
+            return max(datetime.strptime(s, "%Y-%m-%d").date(), today), True
+        except ValueError:
+            return today, False
+    if s in ("", "today", "now", "asap", "this afternoon", "this morning", "tonight"):
+        return today, True
+    if s in ("tomorrow", "tmrw"):
+        return today + timedelta(days=1), True
+    if s == "day after tomorrow":
+        return today + timedelta(days=2), True
+
+    words = s.split()
+    m = re.fullmatch(r"in (\w+) (day|days|week|weeks)", s)
+    if m:
+        n = int(m.group(1)) if m.group(1).isdigit() else _NUMBER_WORDS.get(m.group(1))
+        if n:
+            return today + timedelta(days=n * (7 if m.group(2).startswith("week") else 1)), True
+
+    next_monday = today + timedelta(days=7 - today.weekday())
+    weekday = next((_WEEKDAYS[w] for w in words if w in _WEEKDAYS), None)
+    if "after next" in s and "week" in s:  # "the week after next [weekday]"
+        return next_monday + timedelta(days=7 + (weekday or 0)), True
+    if weekday is not None:
+        if "next" in words:
+            return next_monday + timedelta(days=weekday), True
+        return today + timedelta(days=(weekday - today.weekday()) % 7), True
+    if s in ("next week", "following week"):
+        return next_monday, True
+
+    month = next((_MONTHS[w] for w in words if w in _MONTHS), None)
+    num = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?\b", s)
+    if num and 1 <= int(num.group(1)) <= 31:
+        found = _add_months_day(today, int(num.group(1)), month)
+        if found:
+            return found, True
+    return today, False
+
+
+def parse_time_pref(text: str | None) -> time | None:
+    """'14:00', '2pm', '2:30 pm', '2 PM' -> time; None when absent or unreadable."""
+    if not text:
+        return None
+    m = re.fullmatch(r"\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\s*", text.strip().lower())
+    if not m:
+        return None
+    hour, minute, suffix = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").replace(".", "")
+    if suffix == "pm" and hour < 12:
+        hour += 12
+    elif suffix == "am" and hour == 12:
+        hour = 0
+    return time(hour, minute) if hour < 24 and minute < 60 else None
+
+
+def spoken_day(d: date) -> str:
+    return f"{d:%A, %B} {d.day}"
+
+
 def _slot_id(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -65,6 +164,9 @@ class CallSession:
         # The call_logs insert runs in the background so the greeting isn't delayed;
         # anything that references it (appointments FK, billing) awaits this first.
         self._call_log_ready = call_log_ready
+        self.language_state = language_module.LanguageState()
+        # Set by the pipeline: queues the settings frames that move STT and the voice to a new language.
+        self.apply_language = None
         self._pending: set[asyncio.Task] = set()
         self.caller_phone = normalize_phone(caller_phone)
         self.tz = ZoneInfo(tenant.timezone)
@@ -87,9 +189,13 @@ class CallSession:
                     name="check_availability",
                     description="Find open slots. Call before offering any time.",
                     properties={
-                        "date": {"type": "string", "description": "YYYY-MM-DD; today if no preference."},
+                        "date": {
+                            "type": "string",
+                            "description": "The caller's own words for the day, complete and in English: today, tomorrow, friday, next thursday, friday next week. The system works out the exact date; never compute it. YYYY-MM-DD only if the caller gave a calendar date.",
+                        },
                         "time_of_day": {"type": "string", "enum": ["morning", "afternoon", "evening", "any"]},
-                        "is_emergency": {"type": "boolean", "description": "True: search only the next two hours."},
+                        "is_emergency": {"type": "boolean", "description": "True: soonest same-day slots."},
+                        "preferred_time": {"type": "string", "description": "A time the caller named, e.g. 14:00 or 2pm."},
                     },
                     required=["date", "time_of_day", "is_emergency"],
                 ),
@@ -97,7 +203,7 @@ class CallSession:
                     name="book_appointment",
                     description="Book a slot after the caller confirmed the read-back.",
                     properties={
-                        "patient_name": {"type": "string"},
+                        "patient_name": {"type": "string", "description": "Full name in Latin letters (transliterate if the caller spoke another script)."},
                         "phone_number": {"type": "string", "description": "Contact number, digits."},
                         "visit_reason": {"type": "string", "description": "e.g. Routine Cleaning, Toothache, Crown/Filling, Cosmetic."},
                         "is_new_patient": {"type": "boolean"},
@@ -142,6 +248,12 @@ class CallSession:
                     required=["reason"],
                 ),
                 FunctionSchema(
+                    name="set_language",
+                    description="Switch the voice and speech recognition to the caller's language. Needed for Urdu; other languages switch automatically.",
+                    properties={"language": {"type": "string", "enum": list(language_module.SUPPORTED)}},
+                    required=["language"],
+                ),
+                FunctionSchema(
                     name="end_call",
                     description="Say goodbye and hang up.",
                     properties={"farewell": {"type": "string", "description": "One short goodbye."}},
@@ -158,6 +270,7 @@ class CallSession:
             "reschedule_appointment": self.reschedule_appointment,
             "cancel_appointment": self.cancel_appointment,
             "flag_urgent_callback": self.flag_urgent_callback,
+            "set_language": self.set_language,
         }
         for name, handler in handlers.items():
             llm.register_function(name, self._wrap(name, handler), timeout_secs=12)
@@ -216,30 +329,45 @@ class CallSession:
 
     # ------------------------------------------------------------------ tools
 
-    async def check_availability(self, date: str, time_of_day: str = "any", is_emergency: bool = False) -> dict:
+    async def check_availability(
+        self, date: str, time_of_day: str = "any", is_emergency: bool = False, preferred_time: str | None = None
+    ) -> dict:
         calcom = self._require_calendar()
         now = datetime.now(self.tz)
 
         if is_emergency:
             return await self._emergency_slots(calcom, now)
 
-        try:
-            day = datetime.strptime(date, "%Y-%m-%d").date()
-        except (TypeError, ValueError):
-            day = now.date()
-        day = max(day, now.date())
+        day, understood = resolve_day(date, now.date())
+        wanted = parse_time_pref(preferred_time)
 
         start = max(datetime.combine(day, time.min, self.tz), now + _MIN_LEAD_TIME)
         end = datetime.combine(day + timedelta(days=_SEARCH_DAYS), time.min, self.tz)
         slots = await calcom.get_slots(self.tenant.cal_com_event_type_id, start, end, self.tenant.timezone)
-        slots = [s.astimezone(self.tz) for s in slots if _matches_time_of_day(s.astimezone(self.tz), time_of_day)]
+        slots = [s.astimezone(self.tz) for s in slots]
+        if wanted is None:  # a named time beats a vague part of the day
+            slots = [s for s in slots if _matches_time_of_day(s, time_of_day)]
 
-        on_requested_day = [s for s in slots if s.date() == day]
-        if on_requested_day:
-            return self._offer(on_requested_day[:_MAX_OPTIONS])
-        result = self._offer(slots[:_MAX_OPTIONS], none_note=f"nothing_open_in_the_next_{_SEARCH_DAYS}_days")
-        if slots:
-            result["note"] = "Nothing open on the requested day; these are the nearest alternatives."
+        on_day = [s for s in slots if s.date() == day]
+        pool = on_day
+        if not pool and slots:  # nothing that day: the nearest day that has something
+            pool = [s for s in slots if s.date() == slots[0].date()]
+
+        if wanted is not None:  # closest to the requested time first
+            target = wanted.hour * 60 + wanted.minute
+            pool = sorted(pool, key=lambda s: (abs(s.hour * 60 + s.minute - target), s))
+        result = self._offer(pool[:_MAX_OPTIONS], none_note=f"nothing_open_in_the_next_{_SEARCH_DAYS}_days")
+
+        result["searched_day"] = spoken_day(day)
+        result["same_day"] = bool(on_day)
+        if wanted is not None:
+            result["exact_match"] = any(s.hour == wanted.hour and s.minute == wanted.minute for s in on_day)
+        if not understood:
+            result["note"] = f"Could not read the requested day {date!r}; searched {spoken_day(day)}. Ask the caller to confirm the day."
+        elif pool and not on_day:
+            result["note"] = (
+                f"Nothing open on {spoken_day(day)}. These are on {spoken_day(pool[0].date())}, the nearest day with openings."
+            )
         return result
 
     async def _emergency_slots(self, calcom: CalCom, now: datetime) -> dict:
@@ -423,6 +551,16 @@ class CallSession:
 
         await asyncio.shield(write())
         return {"status": "cancelled"}
+
+    async def set_language(self, language: str) -> dict:
+        code = (language or "en").lower()
+        if code not in language_module.SUPPORTED:
+            return {"error": "unsupported_language", "say": "Apologize briefly and continue in English."}
+        if self.apply_language and code != self.language_state.current:
+            await self.apply_language(code)
+        else:
+            self.language_state.current = code
+        return {"status": "ok", "language": code, "say": "Reply in this language from now on."}
 
     async def flag_urgent_callback(self, reason: str) -> dict:
         await db.flag_urgent_callback(self.call_id, reason[:500])

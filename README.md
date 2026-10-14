@@ -69,3 +69,15 @@ Expect roughly **0.8–1.2 s caller-perceived response time** over the phone net
 ## Before real patient data
 
 Transcripts and recordings are PHI. You need BAAs with Telnyx, Deepgram, OpenAI, Cartesia, and Supabase (HIPAA add-on), and Railway's terms need checking. Until those are in place, use demo tenants only.
+
+## Languages and dates
+
+- **Languages:** English, Spanish, French, German, Portuguese, Italian, Hindi, Urdu. Speech recognition starts in
+  Deepgram nova-3 `multi`, which reports each utterance's language; the voice (Cartesia sonic-3.6, same voice for every
+  language) switches before the LLM replies. Urdu is not in `multi` (it is heard as Hindi), so it runs on a second
+  Deepgram service behind a `ServiceSwitcher`, selected by Urdu vocabulary in the transcript or by the `set_language`
+  tool. Hindi and Urdu speech are the same language to a recognizer: a caller who uses no Urdu-specific words is
+  answered in Hindi until they ask for Urdu. The spoken phrases in `app/language.py` should be reviewed by native speakers.
+  Set `DEEPGRAM_LANGUAGE=en` to turn multilingual recognition off.
+- **Dates:** the model passes the caller's own words ("next thursday", "friday next week", "the 26th") and code resolves
+  them against the practice's clock (`resolve_day` in `app/tools.py`); the model never does calendar arithmetic.

@@ -18,6 +18,7 @@ from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import EndWorkerFrame, LLMFullResponseStartFrame, LLMTextFrame, TTSSpeakFrame
 from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.service_switcher import ServiceSwitcher, ServiceSwitcherStrategyManual
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
@@ -35,7 +36,9 @@ from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPI
 from pipecat.workers.runner import WorkerRunner
 
 from app import config, db
+from app import language as language_module
 from app.db import Tenant
+from app.language import LanguageDetector
 from app.prompts import build_system_prompt
 from app.tools import CallSession
 
@@ -64,18 +67,22 @@ def _greeting(tenant: Tenant) -> str:
     return f"Thanks for calling {tenant.name}, this is Mia.{disclosure} How can I help you today?"
 
 
-def build_services() -> tuple[DeepgramSTTService, OpenAILLMService, CartesiaTTSService]:
-    stt = DeepgramSTTService(
+def build_stt(language: str) -> DeepgramSTTService:
+    return DeepgramSTTService(
         api_key=config.DEEPGRAM_API_KEY,
         settings=DeepgramSTTService.Settings(
             model=config.DEEPGRAM_MODEL,
-            language=Language.EN_US,
+            language=language,
             smart_format=True,
             punctuate=True,
             interim_results=True,
             **({"endpointing": config.DEEPGRAM_ENDPOINTING_MS} if config.DEEPGRAM_ENDPOINTING_MS is not None else {}),
         ),
     )
+
+
+def build_services() -> tuple[DeepgramSTTService, OpenAILLMService, CartesiaTTSService]:
+    stt = build_stt(config.DEEPGRAM_LANGUAGE)
     llm = OpenAILLMService(
         api_key=config.OPENAI_API_KEY,
         settings=OpenAILLMService.Settings(
@@ -146,6 +153,9 @@ async def run_call(
 
     stt, llm, tts = build_services()
     session.register(llm)
+    stt_urdu = build_stt("ur")
+    stt_switcher = ServiceSwitcher(services=[stt, stt_urdu], strategy_type=ServiceSwitcherStrategyManual)
+    session.language_state.stt_services = {session.language_state.stt: stt, "ur": stt_urdu}
     greeting = _greeting(tenant)
     context = LLMContext(
         messages=[{"role": "system", "content": build_system_prompt(tenant, caller_phone or "")}],
@@ -165,7 +175,8 @@ async def run_call(
     pipeline = Pipeline(
         [
             transport.input(),
-            stt,
+            stt_switcher,
+            LanguageDetector(session.language_state, lambda frame: worker.queue_frame(frame)),
             aggregators.user(),
             llm,
             spoke,
@@ -186,6 +197,12 @@ async def run_call(
         enable_rtvi=rtvi,  # only the browser test client speaks RTVI; phone calls skip the extra processor
     )
 
+    async def apply_language(code: str) -> None:
+        log.info(f"language set to {code}")
+        await worker.queue_frames(language_module.switch_frames(session.language_state, code))
+
+    session.apply_language = apply_language
+
     @llm.event_handler("on_function_calls_started")
     async def on_tool_started(service, function_calls):
         # Tools take 0.5-3 s (Cal.com, Supabase). A short spoken acknowledgement keeps the line
@@ -195,13 +212,14 @@ async def run_call(
         names = {c.function_name for c in function_calls}
         emergency = any(c.function_name == "check_availability" and (c.arguments or {}).get("is_emergency")
                         for c in function_calls)
+        lang = session.language_state.current
         if emergency:
             # Spoken by code, not the LLM, so an emergency always gets an immediate human-sounding reply.
-            filler = "I'm so sorry you're hurting. Let me get you in right away. If it's ever hard to breathe or swallow, call 911."
+            filler = language_module.phrase("emergency", lang)
         elif names & {"book_appointment", "reschedule_appointment", "cancel_appointment"}:
-            filler = "Got it, one moment."
+            filler = language_module.phrase("book", lang)
         elif names & {"check_availability", "find_appointments"}:
-            filler = "One moment while I check."
+            filler = language_module.phrase("check", lang)
         else:
             return
         await service.push_frame(TTSSpeakFrame(filler, append_to_context=False))
@@ -232,18 +250,19 @@ async def run_call(
     async def on_idle(_agg):
         nonlocal idle_prompts
         idle_prompts += 1
+        lang = session.language_state.current
         if idle_prompts == 1:
-            await worker.queue_frame(TTSSpeakFrame("Are you still there?"))
+            await worker.queue_frame(TTSSpeakFrame(language_module.phrase("still_there", lang)))
         else:
             await worker.queue_frames(
-                [TTSSpeakFrame("I'll let you go for now. Feel free to call back anytime. Goodbye!"), EndWorkerFrame()]
+                [TTSSpeakFrame(language_module.phrase("idle_goodbye", lang)), EndWorkerFrame()]
             )
 
     async def enforce_max_duration():
         await asyncio.sleep(config.MAX_CALL_SECONDS)
         log.warning("max call duration reached")
         await worker.queue_frames(
-            [TTSSpeakFrame("I'm sorry, I need to wrap up this call. Please call back if you need anything else."), EndWorkerFrame()]
+            [TTSSpeakFrame(language_module.phrase("max_duration", session.language_state.current)), EndWorkerFrame()]
         )
 
     duration_guard = asyncio.create_task(enforce_max_duration())

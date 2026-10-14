@@ -2,7 +2,8 @@ import asyncio
 import json
 import base64
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -311,3 +312,211 @@ def test_prompt_emergency_rules():
     assert "911" in section  # life-threatening only: the single exception
     assert "nearest emergency room" not in prompt
     assert "check_availability call with is_emergency true" in section
+
+
+# --- date grounding ----------------------------------------------------------------------------
+
+TODAY = date(2026, 10, 14)  # a Wednesday
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("today", date(2026, 10, 14)), ("tomorrow", date(2026, 10, 15)),
+    ("friday", date(2026, 10, 16)), ("this friday", date(2026, 10, 16)),
+    ("next friday", date(2026, 10, 23)), ("next thursday", date(2026, 10, 22)),
+    ("thursday next week", date(2026, 10, 22)), ("next week", date(2026, 10, 19)),
+    ("monday", date(2026, 10, 19)), ("wednesday", date(2026, 10, 14)),
+    ("next wednesday", date(2026, 10, 21)), ("2026-10-28", date(2026, 10, 28)),
+    ("2020-01-01", date(2026, 10, 14)),  # the past is clamped to today
+    ("the 26th", date(2026, 10, 26)), ("26th", date(2026, 10, 26)), ("october 26", date(2026, 10, 26)),
+    ("oct 26th", date(2026, 10, 26)), ("the 3rd", date(2026, 11, 3)),   # already past this month -> next month
+    ("january 5", date(2027, 1, 5)), ("in two weeks", date(2026, 10, 28)), ("in 5 days", date(2026, 10, 19)),
+    ("the week after next", date(2026, 10, 26)), ("wednesday of the week after next", date(2026, 10, 28)),
+])
+def test_resolve_day(text, expected):
+    assert tools.resolve_day(text, TODAY) == (expected, True)
+
+
+def test_resolve_day_reports_when_it_cannot_understand():
+    assert tools.resolve_day("banana", TODAY) == (TODAY, False)
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("14:00", dtime(14, 0)), ("2pm", dtime(14, 0)), ("2:30 PM", dtime(14, 30)),
+    ("12am", dtime(0, 0)), ("12pm", dtime(12, 0)), ("25:00", None), ("later", None), (None, None),
+])
+def test_parse_time_pref(text, expected):
+    assert tools.parse_time_pref(text) == expected
+
+
+def test_prompt_contains_todays_date_and_tells_the_model_not_to_compute_dates():
+    prompt = build_system_prompt(make_tenant(), "+15125550101")
+    now = datetime.now(TZ)
+    assert f"{now:%A, %B} {now.day}, {now.year}" in prompt
+    assert "Never work out dates yourself" in prompt and "next thursday" in prompt
+
+
+def test_availability_ranks_by_preferred_time_and_flags_exact_match(session):
+    day = session.tomorrow.date()
+    session.calcom.slots = [session.tomorrow.replace(hour=h) for h in (9, 11, 14, 16)]
+    result = run(session.check_availability(day.isoformat(), "any", False, "2pm"))
+    assert result["exact_match"] is True and result["same_day"] is True
+    assert result["options"][0]["spoken"].endswith("2 PM")  # closest first
+    assert result["searched_day"] == tools.spoken_day(day)
+
+    result = run(session.check_availability(day.isoformat(), "any", False, "1pm"))
+    assert result["exact_match"] is False  # 1 PM is not open; 2 PM is the closest, not an exact match
+
+
+def test_availability_says_when_the_day_has_nothing(session):
+    day = session.tomorrow.date() + timedelta(days=1)
+    session.calcom.slots = [session.tomorrow.replace(hour=10) + timedelta(days=3)]  # only open 3 days after tomorrow
+    result = run(session.check_availability(day.isoformat(), "any", False))
+    assert result["same_day"] is False and "Nothing open on" in result["note"]
+    assert len(result["options"]) == 1
+
+
+def test_availability_understands_relative_days(session):
+    result = run(session.check_availability("tomorrow", "morning", False))
+    assert result["searched_day"] == tools.spoken_day(session.tomorrow.date())
+
+
+# --- languages ----------------------------------------------------------------------------------
+
+from pipecat.frames.frames import (  # noqa: E402
+    LLMMessagesAppendFrame,
+    ManuallySwitchServiceFrame,
+    TranscriptionFrame,
+    TTSUpdateSettingsFrame,
+)  # noqa: E402
+from pipecat.processors.frame_processor import FrameDirection  # noqa: E402
+from pipecat.transcriptions.language import Language  # noqa: E402
+
+from app import language as lang  # noqa: E402
+
+
+def test_every_spoken_phrase_exists_in_every_supported_language():
+    for kind, table in lang.PHRASES.items():
+        assert set(table) == set(lang.SUPPORTED), f"{kind} is missing {set(lang.SUPPORTED) - set(table)}"
+    assert all("911" in lang.phrase("emergency", code) for code in lang.SUPPORTED)  # safety line everywhere
+    assert lang.phrase("check", "xx") == lang.phrase("check", "en")  # unknown language falls back to English
+
+
+def test_switch_frames_only_touch_stt_for_urdu():
+    state = lang.LanguageState("multi")
+    multi, urdu = object(), object()
+    state.stt_services = {"multi": multi, "ur": urdu}
+    frames = lang.switch_frames(state, "es")
+    assert [type(f) for f in frames] == [TTSUpdateSettingsFrame] and state.current == "es" and state.stt == "multi"
+
+    frames = lang.switch_frames(state, "ur")
+    assert [type(f) for f in frames] == [ManuallySwitchServiceFrame, TTSUpdateSettingsFrame]
+    assert state.stt == "ur" and frames[0].service is urdu
+
+    frames = lang.switch_frames(state, "en")  # back out of Urdu restores multilingual STT
+    assert frames[0].service is multi and state.stt == "multi"
+
+
+def _detect(state, text, code):
+    detector = lang.LanguageDetector(state, None)
+    frame = TranscriptionFrame(text, "u", "2030-01-01T00:00:00Z", Language(code) if code else None)
+    detector._recent.append(text)  # process_frame does this before detecting
+    return detector._detected(frame)
+
+
+def test_detector_switches_on_a_clear_foreign_utterance():
+    state = lang.LanguageState("multi")
+    assert _detect(state, "hola quisiera una cita", "es") == "es"
+    assert _detect(state, "hello I need an appointment", "en") is None  # already English
+
+
+def test_detector_ignores_short_noisy_or_unsupported_utterances():
+    state = lang.LanguageState("multi")
+    assert _detect(state, "si", "es") is None                          # one word
+    assert _detect(state, "bonjour oui merci", "fr") is None          # three words
+    assert _detect(state, "ni hao wo yao yue", "zh") is None           # unsupported language
+    assert _detect(state, "hola quisiera una cita", None) is None      # no language reported
+
+
+def test_detector_leaves_language_alone_in_urdu_mode():
+    state = lang.LanguageState("multi")
+    state.stt_services = {"multi": object(), "ur": object()}
+    lang.switch_frames(state, "ur")
+    assert _detect(state, "hola quisiera una cita", "es") is None
+
+
+def test_set_language_tool_applies_frames(session):
+    applied = []
+
+    async def apply(code):
+        applied.append(code)
+        session.language_state.current = code
+
+    session.apply_language = apply
+    assert run(session.set_language("ur"))["status"] == "ok" and applied == ["ur"]
+    assert run(session.set_language("klingon"))["error"] == "unsupported_language"
+
+
+def test_hindi_with_urdu_vocabulary_is_treated_as_urdu():
+    state = lang.LanguageState("multi")
+    assert _detect(state, "असामिलायक़म मुझे कल मुलाकात बुक करनी है", "hi") == "ur"     # Urdu greeting
+    assert _detect(state, "मुझे कल अपॉइंटमेंट बुक करना है", "hi") == "hi"             # plain Hindi stays Hindi
+    assert _detect(state, "मैं कल मुलाकात बुक करना चाहता हूं", "hi") == "hi"          # one weak marker is not enough
+    assert _detect(state, "मेहरबानी करके कल मुलाकात बुक करें", "hi") == "ur"          # two weak markers are
+
+
+def test_urdu_greeting_in_an_earlier_segment_counts():
+    detector = lang.LanguageDetector(lang.LanguageState("multi"), None)
+    for text in ["Aslam alaikum.", "मुझे अगले जुमेरात दोपहर दो बजे बुक करना है"]:
+        detector._recent.append(text)
+    frame = TranscriptionFrame("मुझे अगले जुमेरात दोपहर दो बजे बुक करना है", "u", "2030-01-01T00:00:00Z", Language("hi"))
+    assert detector._detected(frame) == "ur"
+
+
+def test_common_hindi_words_do_not_trigger_urdu():
+    state = lang.LanguageState("multi")
+    assert _detect(state, "जी हाँ शुक्रिया ज़रूर आऊँगा कल", "hi") == "hi"
+
+
+@pytest.mark.parametrize("greeting", ["अस्लामायक़म", "असामिलायक़म", "अस्सलामु अलैकुम", "Aslam alaikum.", "assalamualaikum", "आदाब"])
+def test_urdu_greeting_spellings_all_match(greeting):
+    assert lang.looks_urdu(greeting)
+
+
+@pytest.mark.parametrize("hindi", ["नमस्ते, मुझे अपॉइंटमेंट चाहिए", "जी हाँ शुक्रिया ज़रूर", "मैं कल मुलाकात book करना चाहता हूं"])
+def test_hindi_phrases_do_not_match_urdu(hindi):
+    assert not lang.looks_urdu(hindi)
+
+
+def test_a_hindi_caller_is_not_switched_to_german_by_a_mislabeled_fragment():
+    state = lang.LanguageState("multi")
+    lang.switch_frames(state, "hi")
+    assert _detect(state, "Mein Name ist Ahmed Khan", "de") is None
+
+
+def test_switching_between_two_foreign_languages_needs_more_words():
+    state = lang.LanguageState("multi")
+    lang.switch_frames(state, "es")
+    assert _detect(state, "bonjour je voudrais un rendez-vous", "fr") is None          # 5 words
+    assert _detect(state, "bonjour je voudrais un rendez-vous demain matin", "fr") == "fr"  # 8 words
+    assert _detect(state, "hello I would like an appointment", "en") == "en"           # back to English is easy
+
+
+def test_stt_update_enters_at_pipeline_start_but_voice_update_goes_downstream():
+    # STT is upstream of the detector, so a downstream STT frame would never reach it (a real bug caught live).
+    state = lang.LanguageState("multi")
+    state.stt_services = {"multi": object(), "ur": object()}
+    queued, pushed = [], []
+    detector = lang.LanguageDetector(state, lambda f: _collect(queued, f))
+
+    async def push(frame, direction=None):
+        pushed.append(frame)
+
+    detector.push_frame = push
+    run(detector._apply("ur", "बराए मेहरबानी मुलाकात उर्दू में बात करें", FrameDirection.DOWNSTREAM))
+    assert [type(f) for f in queued] == [ManuallySwitchServiceFrame] and queued[0].service is state.stt_services["ur"]
+    assert [type(f) for f in pushed] == [TTSUpdateSettingsFrame, LLMMessagesAppendFrame]
+    assert "Urdu" in pushed[1].messages[0]["content"] and pushed[1].run_llm is False
+
+
+async def _collect(bucket, frame):
+    bucket.append(frame)
