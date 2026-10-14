@@ -1,4 +1,4 @@
-"""One Pipecat pipeline per inbound call:
+"""One Pipecat pipeline per call (phone via run_bot, browser test via run_call):
 
     Telnyx WS -> Deepgram STT -> user aggregator (Silero VAD + Smart Turn)
               -> gpt-4o-mini (+ tools) -> Cartesia TTS -> Telnyx WS
@@ -72,14 +72,7 @@ def build_services() -> tuple[DeepgramSTTService, OpenAILLMService, CartesiaTTSS
 
 
 async def run_bot(websocket: WebSocket, call_data: TelnyxCallData, tenant: Tenant, call_sid: str | None) -> None:
-    started = time.monotonic()
-    call_id = await db.create_call_log(
-        tenant.id, call_data.from_number or "unknown", call_data.call_id, call_sid
-    )
-    session = CallSession(tenant, call_id, call_data.from_number)
-    transcript: list[dict] = []
-    log = logger.bind(call_id=call_id, client_id=tenant.id)
-
+    """A phone call: Telnyx media stream over a WebSocket, 8 kHz."""
     encoding = call_data.outbound_encoding or "PCMU"
     serializer = TelnyxFrameSerializer(
         stream_id=call_data.stream_id,
@@ -97,12 +90,34 @@ async def run_bot(websocket: WebSocket, call_data: TelnyxCallData, tenant: Tenan
             serializer=serializer,
         ),
     )
+    await run_call(
+        transport, tenant,
+        caller_phone=call_data.from_number, call_control_id=call_data.call_id, call_sid=call_sid,
+        sample_rate=PHONE_SAMPLE_RATE,
+    )
+
+
+async def run_call(
+    transport,
+    tenant: Tenant,
+    *,
+    caller_phone: str | None,
+    call_control_id: str | None,
+    call_sid: str | None,
+    sample_rate: int,
+) -> None:
+    """The call itself, independent of how audio arrives (phone or browser test)."""
+    started = time.monotonic()
+    call_id = await db.create_call_log(tenant.id, caller_phone or "unknown", call_control_id, call_sid)
+    session = CallSession(tenant, call_id, caller_phone)
+    transcript: list[dict] = []
+    log = logger.bind(call_id=call_id, client_id=tenant.id)
 
     stt, llm, tts = build_services()
     session.register(llm)
     greeting = _greeting(tenant)
     context = LLMContext(
-        messages=[{"role": "system", "content": build_system_prompt(tenant, call_data.from_number or "")}],
+        messages=[{"role": "system", "content": build_system_prompt(tenant, caller_phone or "")}],
         tools=session.tools_schema(),
     )
     aggregators = LLMContextAggregatorPair(
@@ -129,8 +144,8 @@ async def run_bot(websocket: WebSocket, call_data: TelnyxCallData, tenant: Tenan
     worker = PipelineWorker(
         pipeline,
         params=PipelineParams(
-            audio_in_sample_rate=PHONE_SAMPLE_RATE,
-            audio_out_sample_rate=PHONE_SAMPLE_RATE,
+            audio_in_sample_rate=sample_rate,
+            audio_out_sample_rate=sample_rate,
             enable_metrics=True,
             enable_usage_metrics=True,
         ),

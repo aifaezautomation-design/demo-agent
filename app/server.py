@@ -12,6 +12,7 @@ Call flow:
 import base64
 import hmac
 import json
+import os
 import time
 from urllib.parse import parse_qs, quote, urlencode
 from xml.sax.saxutils import escape, quoteattr
@@ -75,6 +76,12 @@ def _parse_params(request: Request, raw: bytes) -> dict[str, str]:
         data = json.loads(raw or b"{}")
         return {k: str(v) for k, v in data.items() if not isinstance(v, (dict, list))}
     return {k: v[0] for k, v in parse_qs(raw.decode()).items()}
+
+
+if os.getenv("ENABLE_TEST_UI") == "1":
+    from app.webtest import mount_test_ui
+
+    mount_test_ui(app)
 
 
 @app.get("/health")

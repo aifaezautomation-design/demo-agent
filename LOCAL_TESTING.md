@@ -119,6 +119,20 @@ You play the patient. Mia uses the real prompt, tools, Cal.com, and Supabase, an
 
 This is the fastest way to tune the prompt: try rescheduling, canceling, emergencies, "are you a robot?", and off-topic questions.
 
+## 5b. Talk to Mia by voice in your browser
+
+This runs the real voice pipeline (Deepgram, gpt-4o-mini, Cartesia, Cal.com, Supabase) with your browser microphone in place of the phone line. It needs no Telnyx account.
+
+```powershell
+.\.venv\Scripts\pip install -r requirements-local.txt
+# in .env:  ENABLE_TEST_UI=1
+.\.venv\Scripts\python -m uvicorn app.server:app --port 8000
+```
+
+Open **http://localhost:8000/test**, click Connect, allow the microphone, and talk. Mia greets you after about 3 seconds. The test call is billed to the `apex-dental` tenant and appears in `call_logs`, and bookings are real. Change the tenant or caller ID with `TEST_TENANT_ID` and `TEST_CALLER_PHONE`.
+
+The page only answers requests addressed to `localhost`, so it can't be reached through ngrok. Never set `ENABLE_TEST_UI` on Railway.
+
 ## 6. Make a real phone call to your local machine
 
 Telnyx sends calls to a public URL, and ngrok forwards that URL to the server on your PC:

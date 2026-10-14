@@ -1,0 +1,4 @@
+# Extra packages for the local browser test page (ENABLE_TEST_UI=1). Not needed on Railway.
+-r requirements.txt
+pipecat-ai[webrtc]==1.12.0
+pipecat-ai-prebuilt>=1.2.2

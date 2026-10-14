@@ -213,3 +213,9 @@ async def save_recording(call_sid: str, audio: bytes) -> bool:
     )
     await db.table("call_logs").update({"recording_path": path}).eq("id", row["id"]).execute()
     return True
+
+
+async def get_tenant_by_id(client_id: str) -> Tenant | None:
+    db = await get_db()
+    res = await db.table("clients").select("phone_number").eq("id", client_id).maybe_single().execute()
+    return await get_tenant_by_number(res.data["phone_number"]) if res and res.data else None
