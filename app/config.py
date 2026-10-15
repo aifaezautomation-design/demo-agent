@@ -53,6 +53,8 @@ _ep = os.getenv("DEEPGRAM_ENDPOINTING_MS", "")
 DEEPGRAM_ENDPOINTING_MS = int(_ep) if _ep else None
 # Silence before voice-activity detection ends a turn (seconds); Smart Turn then confirms.
 VAD_STOP_SECS = float(os.getenv("VAD_STOP_SECS", "0.2"))
+# Seconds of caller silence before "Are you still there?"; a second stretch ends the call. Never counted during a tool call.
+USER_IDLE_SECS = float(os.getenv("USER_IDLE_SECS", "20"))
 
 # Cartesia volume multiplier (0.5-2.0, 1.0 = normal). The voice already peaks near full scale,
 # so above ~1.5 speech starts to clip and sound distorted: 1.25 -> 0.1%, 1.5 -> 0.8%, 2.0 -> 3.6%.
@@ -70,7 +72,7 @@ MULTILINGUAL_ENABLED = os.getenv("MULTILINGUAL_ENABLED", "0") == "1"
 # Speech-to-text engine for English calls. "nova" = Deepgram nova-3 with Pipecat's VAD + Smart Turn deciding when the
 # caller is done. "flux" = Deepgram Flux (English-only), which predicts the end of the turn itself and lets the LLM
 # start answering before the transcript is final.
-DEEPGRAM_STT = os.getenv("DEEPGRAM_STT", "flux")
+DEEPGRAM_STT = os.getenv("DEEPGRAM_STT", "nova")
 
 # Booking notification emails (Resend). Off unless RESEND_API_KEY is set. A tenant can override the recipient with
 # `notify_email` in its knowledge base. Resend only lets an unverified sender (onboarding@resend.dev) email the

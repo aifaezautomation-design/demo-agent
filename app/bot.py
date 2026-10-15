@@ -204,7 +204,7 @@ async def run_call(
             # Short VAD stop + Smart Turn (the default stop strategy) decides
             # end-of-turn from audio, rather than waiting on long silences.
             vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=config.VAD_STOP_SECS)),
-            user_idle_timeout=12.0,
+            user_idle_timeout=config.USER_IDLE_SECS,
         ),
     )
 
@@ -276,6 +276,7 @@ async def run_call(
     @aggregators.user().event_handler("on_user_turn_stopped")
     async def on_user_turn(_agg, _strategy, message):
         if message.content:
+            log.info(f"patient: {message.content}")
             session.note_heard(message.content)
             transcript.append(session.transcript_entry("patient", message.content))
 
@@ -286,9 +287,16 @@ async def run_call(
 
     idle_prompts = 0
 
+    @aggregators.user().event_handler("on_user_turn_started")
+    async def on_user_started(_agg, _strategy):
+        nonlocal idle_prompts
+        idle_prompts = 0  # the caller is talking: the silence count starts over
+
     @aggregators.user().event_handler("on_user_turn_idle")
     async def on_idle(_agg):
         nonlocal idle_prompts
+        if session.busy:  # a tool call (calendar lookup, booking) is running: that silence is ours, not the caller's
+            return
         idle_prompts += 1
         lang = session.language_state.current
         if idle_prompts == 1:

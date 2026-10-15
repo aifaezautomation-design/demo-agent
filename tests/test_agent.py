@@ -176,7 +176,9 @@ def test_cancel_requires_lookup_and_phone_verification(session):
 def test_services_construct_with_configured_settings(monkeypatch):
     from app.bot import build_services
 
-    stt, llm, tts = build_services(["Dr. Sarah Jenkins", "Delta Dental"])  # default engine: Deepgram Flux (English)
+    assert config.DEEPGRAM_STT == "nova"  # the phone-proven default; Flux is opt-in
+    monkeypatch.setattr(config, "DEEPGRAM_STT", "flux")
+    stt, llm, tts = build_services(["Dr. Sarah Jenkins", "Delta Dental"])  # Deepgram Flux (English)
     assert llm._settings.model == "gpt-4o-mini" and llm._settings.temperature == config.OPENAI_TEMPERATURE <= 0.3
     assert llm._settings.max_tokens == config.OPENAI_MAX_TOKENS <= 150
     assert stt._settings.model == "flux-general-en"
@@ -763,3 +765,20 @@ def test_flagging_an_urgent_callback_returns_at_once(session, monkeypatch):
 
     result, took = run(go())
     assert result["status"] == "flagged" and took < 0.1 and slow.calls == ["flag_urgent_callback"]
+
+
+def test_session_is_busy_only_while_a_tool_runs(session):
+    """The idle timer must not read a running calendar lookup as the caller going quiet."""
+    seen = []
+
+    async def handler():
+        seen.append(session.busy)
+        raise RuntimeError("boom")  # a failing tool still has to release the flag
+
+    async def result_callback(result):
+        seen.append(result["error"])
+
+    params = type("P", (), {"arguments": {}, "result_callback": staticmethod(result_callback)})()
+    assert not session.busy
+    run(session._wrap("t", handler)(params))
+    assert seen == [True, "internal_error"] and not session.busy

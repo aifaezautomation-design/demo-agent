@@ -74,7 +74,7 @@ def test_english_graph_has_no_language_processors(monkeypatch):
     seen = _graph(monkeypatch, multilingual=False)
     assert seen["processors"], "the graph was not captured"
     assert "LanguageDetector" not in seen["processors"] and "ServiceSwitcher" not in seen["processors"]
-    assert "DeepgramFluxSTTService" in seen["processors"]  # the default speech engine
+    assert "DeepgramSTTService" in seen["processors"]  # the default speech engine: nova-3 + Silero VAD + Smart Turn
 
 
 def test_multilingual_graph_adds_detector_and_switcher(monkeypatch):

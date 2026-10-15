@@ -198,6 +198,7 @@ class CallSession:
     def __init__(self, tenant: Tenant, call_id: str, caller_phone: str | None, call_log_ready: asyncio.Future | None = None):
         self.tenant = tenant
         self.call_id = call_id
+        self._tools_running = 0
         # The call_logs insert runs in the background so the greeting isn't delayed;
         # anything that references it (appointments FK, billing) awaits this first.
         self._call_log_ready = call_log_ready
@@ -325,11 +326,17 @@ class CallSession:
             llm.register_function(name, self._wrap(name, handler), timeout_secs=12)
         llm.register_function("end_call", self.end_call)
 
+    @property
+    def busy(self) -> bool:
+        """True while a tool call is in flight, so the idle timer never mistakes our own work for the caller's silence."""
+        return self._tools_running > 0
+
     def _wrap(self, name: str, handler):
         # Errors go back to the LLM as data so Mia can recover in conversation
         # instead of the pipeline logging a stack trace and going silent.
         async def run(params: FunctionCallParams):
             started = time_module.monotonic()
+            self._tools_running += 1
             try:
                 result = await handler(**dict(params.arguments))
             except CalComError as e:
@@ -338,6 +345,8 @@ class CallSession:
             except Exception:
                 logger.exception(f"[{self.call_id}] {name} failed")
                 result = {"error": "internal_error", "say": "Apologize and offer to have the team call back."}
+            finally:
+                self._tools_running -= 1
             logger.info(f"[{self.call_id}] tool {name} took {(time_module.monotonic() - started) * 1000:.0f} ms")
             await params.result_callback(result)
 
