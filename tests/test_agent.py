@@ -782,3 +782,17 @@ def test_session_is_busy_only_while_a_tool_runs(session):
     assert not session.busy
     run(session._wrap("t", handler)(params))
     assert seen == [True, "internal_error"] and not session.busy
+
+
+
+def test_broken_promise_detection():
+    """The 23:17 failure: Mia said "Let me check for availability this Friday." and called no tool, leaving the caller in silence."""
+    from app.bot import broke_promise
+
+    said = "Thank you! One moment, please. Just to confirm, you're looking for a checkup. Let me check for availability this Friday."
+    assert broke_promise(said, called_tool=False)
+    assert not broke_promise(said, called_tool=True)  # promise kept
+    assert not broke_promise("We have nine AM or ten thirty on Friday. Which works better?", called_tool=False)
+    assert not broke_promise("Just to confirm, nine AM Friday for a cleaning. Is that correct?", called_tool=False)  # waits for the caller
+    assert not broke_promise("", called_tool=False)
+    assert broke_promise("I'll check the calendar for you.", called_tool=False)

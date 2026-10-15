@@ -54,6 +54,8 @@ DEEPGRAM_ENDPOINTING_MS = int(_ep) if _ep else None
 # Silence before voice-activity detection ends a turn (seconds); Smart Turn then confirms.
 VAD_STOP_SECS = float(os.getenv("VAD_STOP_SECS", "0.2"))
 # Seconds of caller silence before "Are you still there?"; a second stretch ends the call. Never counted during a tool call.
+# Seconds after a caller's turn with no reply of any kind before the model is re-prompted.
+STALL_SECS = float(os.getenv("STALL_SECS", "6"))
 USER_IDLE_SECS = float(os.getenv("USER_IDLE_SECS", "20"))
 
 # Cartesia volume multiplier (0.5-2.0, 1.0 = normal). The voice already peaks near full scale,

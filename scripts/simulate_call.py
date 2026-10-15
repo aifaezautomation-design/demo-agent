@@ -292,6 +292,7 @@ async def scripted_run(args) -> int:
             except CalComError as e:
                 r.fail(f"Cal.com emergency slot search failed: {e}")
         result = await session.flag_urgent_callback("Simulation: knocked-out tooth, no slot in 2 hours")
+        await session.flush()  # the flag is written in the background
         row = await fetch_one("call_logs", "id", call_id)
         r.check(result["status"] == "flagged" and row["urgent_callback"], "urgent callback flagged on the call log")
 
