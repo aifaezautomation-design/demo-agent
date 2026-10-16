@@ -214,7 +214,11 @@ def _triage_frame(text, frame_class, result=None, emit=None):
 
 
 def test_an_eager_transcript_triggers_triage_before_the_llm_can_start_speculating():
-    from pipecat.frames.frames import EagerTranscriptionFrame, LLMMessagesAppendFrame, TTSSpeakFrame
+    from pipecat.frames.frames import (
+        EagerTranscriptionFrame,
+        LLMMessagesAppendFrame,
+        TTSSpeakFrame,
+    )
 
     triage, (before, after) = _triage_frame("I just knocked out my front tooth and it really hurts.", EagerTranscriptionFrame)
     # the note goes in BEFORE the eager frame, so the speculative response is generated with it
@@ -246,7 +250,11 @@ def test_airway_in_an_eager_transcript_is_handled_at_once():
 
 
 def test_with_flux_the_spoken_lines_go_out_before_the_eager_transcript_not_behind_the_models_reply():
-    from pipecat.frames.frames import EagerTranscriptionFrame, LLMMessagesAppendFrame, TTSSpeakFrame
+    from pipecat.frames.frames import (
+        EagerTranscriptionFrame,
+        LLMMessagesAppendFrame,
+        TTSSpeakFrame,
+    )
 
     emitted = []
 

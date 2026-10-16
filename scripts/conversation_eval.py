@@ -32,8 +32,8 @@ os.environ["RESEND_API_KEY"] = ""
 from openai import AsyncOpenAI
 
 from app import config, tools
-from app.guards import NOTES, PromiseGuard
 from app.db import Tenant
+from app.guards import NOTES, PromiseGuard
 from app.prompts import build_system_prompt
 from app.tools import CallSession
 
