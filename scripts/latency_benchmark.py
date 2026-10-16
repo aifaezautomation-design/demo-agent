@@ -47,7 +47,15 @@ QUESTIONS = [
     "Is there parking at the office?",
     "What kinds of insurance do you take?",
 ]
-if os.environ.get("BENCH_SET") == "tools":  # every one of these makes Mia look at the calendar
+if os.environ.get("BENCH_SET") == "book":  # one whole booking call; the answers are scripted, so Mia must keep up
+    QUESTIONS = [
+        "Hi, I'm a new patient and I'd like to book a cleaning for tomorrow at ten AM.",
+        "My name is Maria Lopez.",
+        "Yes, the number I'm calling from is fine.",
+        "Yes, that's correct.",
+        "No, that's all, thank you. Goodbye.",
+    ]
+elif os.environ.get("BENCH_SET") == "tools":  # every one of these makes Mia look at the calendar
     QUESTIONS = [
         "I'm a new patient and I need a cleaning. Do you have anything tomorrow morning?",
         "I'm a new patient and I need a filling. Do you have anything on Friday afternoon?",

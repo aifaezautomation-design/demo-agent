@@ -7,7 +7,6 @@ Audio stays at 8 kHz end to end to match the phone network and skip resampling.
 """
 
 import asyncio
-import re
 import time
 import uuid
 
@@ -47,6 +46,7 @@ from pipecat.workers.runner import WorkerRunner
 from app import config, db
 from app import language as language_module
 from app.db import Tenant
+from app.guards import NOTES, PromiseGuard, broke_promise  # noqa: F401  (broke_promise is re-exported for tests)
 from app.emergency import EmergencyTriage
 from app.language import LanguageDetector
 from app.prompts import build_system_prompt
@@ -54,26 +54,6 @@ from app.tools import CallSession
 
 PHONE_SAMPLE_RATE = 8000
 _openai = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
-
-
-# "Let me check...", "one moment": a promise to look something up or book it, which only a tool call can keep.
-_PROMISE = re.compile(
-    r"\b(let me (check|see|look|pull|book|find|search|grab)|i'?ll (check|look|book|pull|find|search)|"
-    r"i('?m| am) (checking|looking|booking|pulling|searching)|one moment|just a (moment|second)|hold on|bear with me)\b",
-    re.I,
-)
-_BROKEN_PROMISE_NOTE = (
-    "SYSTEM NOTE: you told the caller you would check or book, but you called no tool, so they are waiting in silence. "
-    "Call the right tool now (check_availability for a day or time; book_appointment only when name, phone, reason and "
-    "slot are all confirmed). Say nothing before the call."
-)
-_STALL_NOTE = "SYSTEM NOTE: the caller is waiting for your reply. Answer their last message now, in one short sentence."
-
-
-def broke_promise(spoken: str, called_tool: bool) -> bool:
-    """True when the model said it would check or book, did not call a tool, and is not waiting on a question."""
-    spoken = spoken.strip()
-    return bool(spoken) and not called_tool and not spoken.endswith("?") and bool(_PROMISE.search(spoken))
 
 
 class _SpokeTracker(FrameProcessor):
@@ -84,8 +64,12 @@ class _SpokeTracker(FrameProcessor):
         self.spoke = False
         self.called = False
         self.text = ""
-        self.nudges = 0  # broken-promise retries allowed once per caller turn
+        self.nudges = 0  # re-prompts allowed once per caller turn
+        self.guard = PromiseGuard()
         self.on_broken_promise = None  # set by run_call, which owns the worker and the context
+        self.searched_this_turn = lambda: True  # set by run_call; True means "do not second-guess availability claims"
+        self.writes = lambda: 0  # set by run_call: bookings, changes and cancellations really saved so far
+        self.on_said = None  # set by run_call: gets every spoken LLM reply the moment it ends
         self.last_activity = time.monotonic()
 
     async def process_frame(self, frame, direction):
@@ -101,9 +85,12 @@ class _SpokeTracker(FrameProcessor):
             self.called = True
             self.last_activity = time.monotonic()
         elif isinstance(frame, LLMFullResponseEndFrame):
-            if self.on_broken_promise and self.nudges < 1 and broke_promise(self.text, self.called):
+            if self.on_said and self.text.strip():
+                self.on_said(self.text.strip())
+            kind = self.guard.check(self.text, self.called, self.writes(), self.searched_this_turn())
+            if kind and self.on_broken_promise and self.nudges < 1:
                 self.nudges += 1
-                asyncio.ensure_future(self.on_broken_promise(self.text.strip()))
+                asyncio.ensure_future(self.on_broken_promise(self.text.strip(), NOTES[kind]))
         await self.push_frame(frame, direction)
 
 
@@ -279,21 +266,31 @@ async def run_call(
         enable_rtvi=rtvi,  # only the browser test client speaks RTVI; phone calls skip the extra processor
     )
 
-    async def keep_promise(spoken: str) -> None:
-        log.warning(f"broken promise (said {spoken!r} but called no tool): re-prompting the model")
-        context.add_message({"role": "system", "content": _BROKEN_PROMISE_NOTE})
+    async def keep_promise(spoken: str, note: str) -> None:
+        log.warning(f"guard fired on {spoken!r}: re-prompting the model")
+        context.add_message({"role": "system", "content": note})
         await worker.queue_frame(LLMRunFrame())
 
     spoke.on_broken_promise = keep_promise
+    spoke.searched_this_turn = lambda: session.turn_searched
+    spoke.on_said = session.note_said
+    spoke.writes = lambda: session.writes
     stall_watch: asyncio.Task | None = None
 
     async def stall_guard(stopped_at: float) -> None:
         # The caller finished speaking and nothing at all happened (no words, no tool): never leave them in silence.
+        # First the model is asked again; if that also produces nothing (an OpenAI outage, a hung tool), a fixed line is spoken.
         await asyncio.sleep(config.STALL_SECS)
-        if spoke.last_activity < stopped_at and not session.busy:
-            log.warning(f"no reply {config.STALL_SECS:.0f}s after the caller's turn: re-prompting the model")
-            context.add_message({"role": "system", "content": _STALL_NOTE})
-            await worker.queue_frame(LLMRunFrame())
+        if spoke.last_activity >= stopped_at or session.busy:
+            return
+        log.warning(f"no reply {config.STALL_SECS:.0f}s after the caller's turn: re-prompting the model")
+        retried_at = time.monotonic()
+        context.add_message({"role": "system", "content": NOTES["stall"]})
+        await worker.queue_frame(LLMRunFrame())
+        await asyncio.sleep(config.STALL_SECS)
+        if spoke.last_activity < retried_at and not session.busy:
+            log.error("the model produced nothing after a re-prompt: speaking the fallback line")
+            await worker.queue_frame(TTSSpeakFrame(language_module.phrase("trouble", session.language_state.current)))
 
     async def apply_language(code: str) -> None:
         log.info(f"language set to {code}")

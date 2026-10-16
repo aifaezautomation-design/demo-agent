@@ -74,6 +74,16 @@ PHRASES: dict[str, dict[str, str]] = {
         "hi": "मुझे बहुत अफ़सोस है कि आपको दर्द हो रहा है। मैं अभी आपके लिए अपॉइंटमेंट देखती हूँ। अगर साँस लेने या निगलने में तकलीफ़ हो, तो तुरंत 911 पर कॉल करें।",
         "ur": "مجھے بہت افسوس ہے کہ آپ کو تکلیف ہو رہی ہے۔ میں ابھی آپ کے لیے ملاقات دیکھتی ہوں۔ اگر سانس لینے یا نگلنے میں دشواری ہو تو فوراً 911 پر کال کریں۔",
     },
+    "trouble": {
+        "en": "Sorry, I missed that. Could you say it again?",
+        "es": "Perdón, no le escuché bien. ¿Puede repetirlo?",
+        "fr": "Désolée, je n'ai pas bien entendu. Pouvez-vous répéter ?",
+        "de": "Entschuldigung, das habe ich nicht verstanden. Können Sie es wiederholen?",
+        "pt": "Desculpe, não entendi. Pode repetir?",
+        "it": "Scusi, non ho capito. Può ripetere?",
+        "hi": "माफ़ कीजिए, मैं सुन नहीं पाई। क्या आप फिर से कह सकते हैं?",
+        "ur": "معاف کیجیے، میں سن نہیں پائی۔ کیا آپ دوبارہ کہہ سکتے ہیں؟",
+    },
     "still_there": {
         "en": "Are you still there?",
         "es": "¿Sigue ahí?",

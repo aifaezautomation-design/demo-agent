@@ -27,10 +27,21 @@ class CalCom:
 
     async def _request(self, method: str, path: str, version: str, **kwargs) -> Any:
         headers = {**self._auth, "cal-api-version": version}
-        try:
-            resp = await _http.request(method, path, headers=headers, **kwargs)
-        except httpx.HTTPError as e:
-            raise CalComError(f"Cal.com unreachable: {e}") from e
+        # Reads are safe to repeat, so a slow or failing lookup gets a second, quicker try (a stalled call is worse than
+        # a retry). Writes are never repeated: a lost reply must not become a double booking.
+        attempts = 2 if method == "GET" else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                if method == "GET":
+                    kwargs["timeout"] = httpx.Timeout(3.5)
+                resp = await _http.request(method, path, headers=headers, **kwargs)
+            except httpx.HTTPError as e:
+                if attempt < attempts:
+                    continue
+                raise CalComError(f"Cal.com unreachable: {e!r}") from e
+            if resp.status_code >= 500 and attempt < attempts:
+                continue
+            break
         if resp.status_code >= 400:
             raise CalComError(f"Cal.com {resp.status_code}: {resp.text[:300]}")
         body = resp.json()

@@ -160,6 +160,7 @@ def test_a_successful_booking_triggers_one_email_and_does_not_wait_for_it(sessio
         option = (await session.check_availability(session.tomorrow.date().isoformat(), "morning"))["options"][0]
         session.note_heard("My name is Jane Wilson")
         t0 = time.perf_counter()
+        confirmed(session)
         result = await session.book_appointment("Jane Wilson", "512-555-0199", "Routine cleaning", True, False, option["slot_id"])
         elapsed = time.perf_counter() - t0
         await asyncio.sleep(0)
@@ -188,6 +189,7 @@ def test_a_rejected_booking_sends_no_email(session, on, monkeypatch):
         option = (await session.check_availability(session.tomorrow.date().isoformat(), "any"))["options"][0]
         session.note_heard("Jane Wilson")
         session.calcom.fail_booking = True
+        confirmed(session)
         return await session.book_appointment("Jane Wilson", "5125550199", "Cleaning", False, False, option["slot_id"])
 
     assert _run(go())["error"] == "slot_no_longer_available"
@@ -203,6 +205,7 @@ def test_a_booking_still_succeeds_when_the_email_code_blows_up(session, on, monk
     async def go():
         option = (await session.check_availability(session.tomorrow.date().isoformat(), "any"))["options"][0]
         session.note_heard("Jane Wilson")
+        confirmed(session)
         return await session.book_appointment("Jane Wilson", "5125550199", "Cleaning", False, False, option["slot_id"])
 
     # the failure must not turn a real calendar booking into an error for the caller
@@ -214,3 +217,10 @@ def test_the_test_suite_can_never_send_a_real_email():
     from app import config as cfg
 
     assert cfg.RESEND_API_KEY == ""
+
+
+def confirmed(session):
+    """The caller heard the read-back and said yes, which book_appointment insists on."""
+    session.note_said("Is the number you're calling from the best one to reach you?")
+    session.note_said("Just to confirm, I have you booked for that time. Is that correct?")
+    session.note_heard("Yes, that's correct.")

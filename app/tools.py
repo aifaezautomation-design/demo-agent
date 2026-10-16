@@ -21,7 +21,7 @@ from app import language as language_module
 from app.calcom import CalCom, CalComError
 from app.db import Tenant
 
-_MAX_OPTIONS = 4  # returned to the LLM; the prompt tells it to offer two
+_MAX_OPTIONS = 12  # the day's times, so the model never claims a time is taken because it saw only a sample; the prompt tells it to offer two
 _SEARCH_DAYS = 7
 _EMERGENCY_WINDOW = timedelta(hours=2)
 _EMERGENCY_SEARCH = timedelta(hours=48)
@@ -176,6 +176,22 @@ def _digits(text: str) -> str:
     return "".join(ch for ch in text if ch.isdigit())
 
 
+_READBACK = re.compile(r"(confirm|correct|that right|sound(s)? (good|right)|does that work|shall i (book|schedule)|"
+                       r"should i (book|schedule)|would you like me to (book|schedule)|go ahead and book)", re.I)
+_YES = re.compile(r"\b(yes|yeah|yep|yup|yea|correct|right|sure|okay|ok|perfect|absolutely|definitely|please|"
+                  r"go ahead|sounds good|that works|that's right|that is correct|uh-huh|mm-hmm)\b", re.I)
+_NO = re.compile(r"^\W*(no|nope|nah|wait|actually|hold on|not)\b", re.I)
+
+
+def is_readback(said: str) -> bool:
+    """Mia's line was a confirmation question (\"Just to confirm ... Is that correct?\")."""
+    return said.strip().endswith("?") and bool(_READBACK.search(said))
+
+
+def is_affirmative(heard: str) -> bool:
+    return bool(_YES.search(heard)) and not _NO.search(heard.strip())
+
+
 def spoken_day(d: date) -> str:
     return f"{d:%A, %B} {d.day}"
 
@@ -199,6 +215,9 @@ class CallSession:
         self.tenant = tenant
         self.call_id = call_id
         self._tools_running = 0
+        self.said: list[str] = []  # what Mia has said, in order; the booking guard reads the last line
+        self.turn_searched = False
+        self._rejected: dict[tuple[str, str], int] = {}
         # The call_logs insert runs in the background so the greeting isn't delayed;
         # anything that references it (appointments FK, billing) awaits this first.
         self._call_log_ready = call_log_ready
@@ -216,6 +235,7 @@ class CallSession:
         # Everything the caller has said, so a booking can be checked against it (see _name_is_from_caller).
         self.heard: list[str] = []
         self.appointment_booked = False
+        self.writes = 0  # bookings, reschedules and cancellations really saved this call
 
     # ------------------------------------------------------------------ setup
 
@@ -327,6 +347,10 @@ class CallSession:
         llm.register_function("end_call", self.end_call)
 
     @property
+    def wrote(self) -> bool:
+        return self.writes > 0
+
+    @property
     def busy(self) -> bool:
         """True while a tool call is in flight, so the idle timer never mistakes our own work for the caller's silence."""
         return self._tools_running > 0
@@ -341,6 +365,8 @@ class CallSession:
                 result = await handler(**dict(params.arguments))
             except CalComError as e:
                 logger.warning(f"[{self.call_id}] {name} Cal.com failure: {e}")
+                if name in ("check_availability", "book_appointment", "reschedule_appointment", "cancel_appointment"):
+                    self._flag_urgent(f"Calendar unavailable during {name}; the caller needs a callback")
                 result = {"error": "calendar_unavailable", "say": "Apologize and offer to have the team call back."}
             except Exception:
                 logger.exception(f"[{self.call_id}] {name} failed")
@@ -386,6 +412,24 @@ class CallSession:
 
     def note_heard(self, text: str) -> None:
         self.heard.append(text)
+        self.turn_searched = False  # a new caller turn: any availability claim now needs a fresh search
+
+    def note_said(self, text: str) -> None:
+        self.said.append(text)
+
+    def _heard_words(self) -> list[str]:
+        text = re.sub(r"[^\w']+", " ", " ".join(self.heard).lower())  # punctuation and hyphens split words
+        words = text.split()
+        # "s i o b h a n" (a name spelled aloud, with or without hyphens) also counts as the word it spells
+        run: list[str] = []
+        for w in words + [""]:
+            if len(w) == 1:
+                run.append(w)
+                continue
+            if len(run) >= 3:
+                words.append("".join(run))
+            run = []
+        return [w.strip("'") for w in words]
 
     def _name_is_from_caller(self, name: str) -> bool:
         """The model must not book under a name the caller never gave (it did, in testing: it called
@@ -394,11 +438,40 @@ class CallSession:
             return False
         if config.MULTILINGUAL_ENABLED:
             return True  # transcripts may be in another script, so a letter-by-letter check would reject real names
-        heard_words = [w.lower().strip("'") for w in " ".join(self.heard).replace(",", " ").replace(".", " ").split()]
-        tokens = [t.strip("'").lower() for t in name.replace("-", " ").split() if len(t.strip("'")) >= 2]
+        heard_words = self._heard_words()
+        tokens = [t.strip("'").lower() for t in re.split(r"[\s\-]+", name) if len(t.strip("'")) >= 2]
         if not tokens:
             return False
         return all(difflib.get_close_matches(tok, heard_words, n=1, cutoff=0.75) for tok in tokens)
+
+    def _caller_confirmed(self) -> bool:
+        """True when Mia's last line was a read-back question and the caller's last words were a yes.
+        The model skipped the read-back in testing and booked straight after the caller picked a time."""
+        return bool(self.said and self.heard) and is_readback(self.said[-1]) and is_affirmative(self.heard[-1])
+
+    def _number_was_asked(self) -> bool:
+        """Mia asked about the contact number at some point in the call (the caller may have volunteered one instead)."""
+        return any(("number" in t.lower() or "phone" in t.lower()) and "?" in t for t in self.said) or any(
+            len(_digits(h)) >= 10 for h in self.heard
+        )
+
+    def _snap_to_caller_id(self, phone: str) -> str:
+        """The model reads the caller ID aloud and passes it back, and garbles digits doing it (it booked +5122... for a
+        +1512... caller). A number one or two digits off the caller ID that the caller never said is the caller ID."""
+        caller = _digits(self.caller_phone or "")[-10:]
+        mine = _digits(phone)[-10:]
+        if caller and mine != caller and mine not in _digits(" ".join(self.heard)):
+            if difflib.SequenceMatcher(None, mine, caller).ratio() >= 0.8:
+                return self.caller_phone
+        return phone
+
+    def _insist(self, kind: str, value: str) -> bool:
+        """True once the model offers the same unverifiable value a second time. The guard exists to stop invented
+        details, not to trap a caller whose real name the speech recognizer spelled differently: the read-back
+        the caller already confirmed is the second check, so the second attempt goes through."""
+        key = (kind, re.sub(r"\W+", "", value.lower()))
+        self._rejected[key] = self._rejected.get(key, 0) + 1
+        return self._rejected[key] >= 2
 
     def _phone_is_from_caller(self, phone: str) -> bool:
         number = _digits(phone)[-10:]
@@ -418,6 +491,7 @@ class CallSession:
     ) -> dict:
         calcom = self._require_calendar()
         now = datetime.now(self.tz)
+        self.turn_searched = True
 
         if is_emergency:
             return await self._emergency_slots(calcom, now)
@@ -429,8 +503,11 @@ class CallSession:
         end = datetime.combine(day + timedelta(days=_SEARCH_DAYS), time.min, self.tz)
         slots = await calcom.get_slots(self.tenant.cal_com_event_type_id, start, end, self.tenant.timezone)
         slots = self._open_hours(s.astimezone(self.tz) for s in slots)
+        part_of_day_missed = False
         if wanted is None:  # a named time beats a vague part of the day
-            slots = [s for s in slots if _matches_time_of_day(s, time_of_day)]
+            matching = [s for s in slots if _matches_time_of_day(s, time_of_day)]
+            part_of_day_missed = bool(slots) and not matching and time_of_day not in ("any", None, "")
+            slots = matching or slots  # never report "nothing open" while the calendar has openings, just not at that hour
 
         on_day = [s for s in slots if s.date() == day]
         pool = on_day
@@ -442,12 +519,30 @@ class CallSession:
             pool = sorted(pool, key=lambda s: (abs(s.hour * 60 + s.minute - target), s))
         result = self._offer(pool[:_MAX_OPTIONS], none_note=f"nothing_open_in_the_next_{_SEARCH_DAYS}_days")
 
+        if not result["options"]:
+            self._flag_urgent(f"Caller wanted an appointment ({date}); no openings found in the next {_SEARCH_DAYS} days")
+            result["say"] = ("Nothing is open. Say so briefly and that a team member will call them back to find a time. "
+                             "Do not call it urgent and do not call any tool.")
         result["searched_day"] = spoken_day(day)
         result["same_day"] = bool(on_day)
+        shown = len(result["options"])
+        if shown and len(on_day) > shown:
+            # The options are a sample. Without this the model reads "I was shown three times" as "only three exist".
+            result["more_open_that_day"] = (
+                f"{len(on_day) - shown} more times are open that day. If the caller wants a different time or part of the day, "
+                "call check_availability again with preferred_time or time_of_day. Never say a time is unavailable without searching for it."
+            )
         if wanted is not None:
-            result["exact_match"] = any(s.hour == wanted.hour and s.minute == wanted.minute for s in on_day)
+            exact = [s for s in on_day if s.hour == wanted.hour and s.minute == wanted.minute]
+            result["exact_match"] = bool(exact)
+            result["answer"] = (
+                f"The caller's time IS open: {spoken_time(exact[0])}. Offer exactly that time first." if exact else
+                "The caller's exact time is NOT open; offer the two closest options (listed first)."
+            )
         if not understood:
             result["note"] = f"Could not read the requested day {date!r}; searched {spoken_day(day)}. Ask the caller to confirm the day."
+        elif part_of_day_missed:
+            result["note"] = f"Nothing open in the {time_of_day}; these are the closest openings. Say so, then offer them."
         elif pool and not on_day:
             result["note"] = (
                 f"Nothing open on {spoken_day(day)}. These are on {spoken_day(pool[0].date())}, the nearest day with openings."
@@ -520,12 +615,23 @@ class CallSession:
         slot = self.offered_slots.get(slot_id)
         if slot is None:
             return {"error": "unknown_slot", "say": "Call check_availability and offer real options first."}
-        if not self._name_is_from_caller(patient_name):
-            return {"error": "name_not_confirmed", "say": "Ask the caller for their full name, then book. Never guess or invent a name."}
+        if not self._name_is_from_caller(patient_name) and not (
+            (patient_name or "").strip().lower() not in _PLACEHOLDER_NAMES and self._insist("name", patient_name)
+        ):
+            return {"error": "name_not_confirmed", "say": "Ask the caller, once, to say their full name, then book with exactly what they say. Never guess or invent a name."}
+        if not is_emergency and not self._caller_confirmed():
+            return {"error": "confirmation_required", "say": (
+                "The caller has not confirmed yet. In one sentence read back their name, the day and time, and the reason, "
+                "then ask \"Is that correct?\". Call book_appointment only after they say yes.")}
+        if not is_emergency and not self._number_was_asked():
+            return {"error": "phone_not_confirmed", "say": (
+                "You have not asked about their number yet. Ask once: \"Is the number you're calling from the best one to "
+                "reach you?\" (do not read the digits aloud), and book with the number they give or the caller ID.")}
         phone = normalize_phone(phone_number) or self.caller_phone
         if not phone:
             return {"error": "missing_phone", "say": "Ask for the best contact number."}
-        if not self._phone_is_from_caller(phone):
+        phone = self._snap_to_caller_id(phone)
+        if not self._phone_is_from_caller(phone) and not self._insist("phone", phone):
             return {"error": "phone_not_confirmed", "say": "Offer the caller ID as their number, or ask for the best number. Never guess one."}
 
         event_type = (
@@ -586,6 +692,7 @@ class CallSession:
             return {"error": "slot_no_longer_available", "say": "Apologize, then check availability again."}
 
         self.appointment_booked = True
+        self.writes += 1
         return {"status": "booked", "time": spoken_time(slot), "patient_name": patient_name}
 
     async def find_appointments(self, phone_number: str | None = None, patient_name: str | None = None) -> dict:
@@ -654,6 +761,7 @@ class CallSession:
             logger.warning(f"[{self.call_id}] reschedule rejected: {e}")
             self.offered_slots.pop(slot_id, None)
             return {"error": "slot_no_longer_available", "say": "Apologize, then check availability again."}
+        self.writes += 1
         return {"status": "rescheduled", "time": spoken_time(slot)}
 
     async def cancel_appointment(self, appointment_id: str, reason: str, phone_last4: str | None = None) -> dict:
@@ -670,6 +778,7 @@ class CallSession:
             )
 
         await asyncio.shield(write())
+        self.writes += 1
         return {"status": "cancelled"}
 
     async def set_language(self, language: str) -> dict:

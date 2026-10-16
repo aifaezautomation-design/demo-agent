@@ -213,6 +213,9 @@ async def scripted_run(args) -> int:
             r.skip("no slots to book")
         else:
             session.note_heard("My name is Simulation Test Patient")  # bookings must use a name the caller gave
+            session.note_said("Is the number you're calling from the best one to reach you?")  # and a read-back the caller confirmed
+            session.note_said("Just to confirm, a routine cleaning at that time. Is that correct?")
+            session.note_heard("Yes, that's correct")
             result = await session.book_appointment(
                 patient_name="Simulation Test Patient",
                 phone_number=caller,

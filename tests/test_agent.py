@@ -95,6 +95,14 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def confirmed(session):
+    """The caller heard the read-back and said yes, which book_appointment now insists on."""
+    session.note_said("Is the number you're calling from the best one to reach you?")
+    session.note_said("Just to confirm, I have you booked for that time. Is that correct?")
+    session.note_heard("Yes, that's correct.")
+    return session
+
+
 async def _search_and_flush(session, now):
     """The emergency search, then wait for its background writes (production waits for them when the call ends)."""
     result = await session._emergency_slots(session.calcom, now)
@@ -128,6 +136,7 @@ def test_availability_filters_by_time_of_day(session):
 
 def test_booking_rejects_slot_that_was_never_offered(session):
     session.note_heard("my name is Jane Wilson")
+    confirmed(session)
     result = run(session.book_appointment("Jane Wilson", "5125550199", "Cleaning", True, False, "2030-01-01T15:00:00Z"))
     assert result["error"] == "unknown_slot"
     assert session.calcom.bookings == []
@@ -137,6 +146,7 @@ def test_booking_offered_slot_records_appointment(session):
     async def go():
         option = (await session.check_availability(session.tomorrow.date().isoformat(), "morning"))["options"][0]
         session.note_heard("My name is Jane Wilson")
+        confirmed(session)
         result = await session.book_appointment("Jane Wilson", "512-555-0199", "Cleaning", True, False, option["slot_id"])
         # Our own record is written behind the reply; flush() is what lookups and call-end wait on.
         await session.flush()
@@ -153,6 +163,7 @@ def test_taken_slot_is_reported_and_forgotten(session):
     option = run(session.check_availability(session.tomorrow.date().isoformat(), "any"))["options"][0]
     session.calcom.fail_booking = True
     session.note_heard("Jane Wilson")
+    confirmed(session)
     result = run(session.book_appointment("Jane Wilson", "5125550199", "Cleaning", False, False, option["slot_id"]))
     assert result["error"] == "slot_no_longer_available"
     assert option["slot_id"] not in session.offered_slots
@@ -641,6 +652,7 @@ def test_prompt_carries_the_clinic_knowledge():
 
 def _book(session, name, phone="5125550199"):
     option = run(session.check_availability(session.tomorrow.date().isoformat(), "any"))["options"][0]
+    confirmed(session)
     return run(session.book_appointment(name, phone, "Cleaning", True, False, option["slot_id"]))
 
 
@@ -790,9 +802,110 @@ def test_broken_promise_detection():
     from app.bot import broke_promise
 
     said = "Thank you! One moment, please. Just to confirm, you're looking for a checkup. Let me check for availability this Friday."
-    assert broke_promise(said, called_tool=False)
-    assert not broke_promise(said, called_tool=True)  # promise kept
-    assert not broke_promise("We have nine AM or ten thirty on Friday. Which works better?", called_tool=False)
-    assert not broke_promise("Just to confirm, nine AM Friday for a cleaning. Is that correct?", called_tool=False)  # waits for the caller
-    assert not broke_promise("", called_tool=False)
-    assert broke_promise("I'll check the calendar for you.", called_tool=False)
+    assert broke_promise(said, called_tool=False) == "promise"
+    assert broke_promise(said, called_tool=True) is None  # promise kept
+    assert broke_promise("We have nine AM or ten thirty on Friday. Which works better?", called_tool=False) is None
+    assert broke_promise("Just to confirm, nine AM Friday for a cleaning. Is that correct?", called_tool=False) is None  # waits for the caller
+    assert broke_promise("", called_tool=False) is None
+    assert broke_promise("I'll check the calendar for you.", called_tool=False) == "promise"
+
+
+def test_unsaved_booking_claim_detection():
+    """Found by conversation_eval: Mia said "You're all set!" after the read-back and never called book_appointment."""
+    from app.bot import broke_promise
+
+    for claim in ("You're all set! Just bring yourself.", "I've booked your cleaning for Thursday at ten.",
+                  "Your appointment is confirmed for Friday at nine.", "Great! I have you booked for a check-up on Friday at noon.", "I have rescheduled your visit to Monday."):
+        assert broke_promise(claim, called_tool=False, saved=False) == "unsaved", claim
+        assert broke_promise(claim, called_tool=False, saved=True) is None, claim  # a real booking was saved
+        assert broke_promise(claim, called_tool=True, saved=False) is None
+    assert broke_promise("Just to confirm, I have you booked for Friday at nine.", called_tool=False, saved=False) is None
+    assert broke_promise("Thanks for calling, goodbye!", called_tool=False, saved=False) is None
+
+
+def test_name_guard_accepts_hyphens_spelling_and_does_not_loop(session):
+    """Found by conversation_eval: a hyphenated, spelled-out name was rejected on every attempt and the caller was stuck."""
+    session.heard = ["it's siobhan fitzgerald-nowak. that's s-i-o-b-h-a-n f-i-t-z-g-e-r-a-l-d - n-o-w-a-k."]
+    assert session._name_is_from_caller("Siobhan Fitzgerald-Nowak")
+    session.heard = ["my name is joy smith"]
+    assert not session._name_is_from_caller("Peter Jones")  # still blocks invented names
+    assert not session._insist("name", "Peter Jones") and session._insist("name", "Peter Jones")  # but never forever
+
+
+def test_nothing_open_flags_a_callback_in_code(session):
+    session.calcom.slots = []
+    result = run(session.check_availability("tomorrow", "any", False))
+    run(session.flush())
+    assert result["options"] == [] and "team member will call" in result["say"]
+    assert session.fake_db.urgent  # recorded for the practice by code, not by the model remembering to
+
+
+def test_part_of_day_never_hides_openings(session):
+    result = run(session.check_availability("tomorrow", "evening", False))  # fixture slots are 9, 10, 14, 15
+    assert result["options"] and "Nothing open in the evening" in result["note"]
+
+
+def test_promise_guard_after_readback():
+    """After "Just to confirm ... Is that correct?" the next reply must be a tool call or a question, never a bare statement."""
+    from app.bot import PromiseGuard
+
+    g = PromiseGuard()
+    assert g.check("Just to confirm, Paul Young, Friday at noon for a checkup. Is that correct?", False, 0) is None
+    assert g.check("Great, see you then. Have a lovely day.", False, 0) == "unsaved"  # a yes, no book_appointment call
+    g = PromiseGuard()
+    g.check("Just to confirm, Paul Young, Friday at noon. Is that correct?", False, 0)
+    assert g.check("", True, 0) is None  # the tool was called
+    assert g.check("Your appointment is set for Friday at noon.", False, 1) is None  # and a booking really was saved
+    g = PromiseGuard()
+    g.check("Just to confirm, Friday at noon. Is that correct?", False, 0)
+    assert g.check("What name should I use?", False, 0) is None  # a question is fine; the stale read-back is dropped
+    assert g.check("Thanks, one moment.", False, 0) == "promise"
+
+
+def test_booking_needs_a_readback_and_a_yes(session):
+    """Found by conversation_eval: Mia booked straight after the caller picked a time, with no read-back."""
+    option = run(session.check_availability(session.tomorrow.date().isoformat(), "any"))["options"][0]
+    session.note_heard("My name is Jane Wilson")
+    args = ("Jane Wilson", "5125550199", "Cleaning", True, False, option["slot_id"])
+    assert run(session.book_appointment(*args))["error"] == "confirmation_required"  # nothing was read back
+    session.note_said("Is the number you're calling from the best one to reach you?")
+    session.note_said("Which time works best?")
+    session.note_heard("Nine please")
+    assert run(session.book_appointment(*args))["error"] == "confirmation_required"  # a pick is not a yes
+    session.note_said("Just to confirm, Jane Wilson, tomorrow at nine for a cleaning. Is that correct?")
+    session.note_heard("No, actually make it ten")
+    assert run(session.book_appointment(*args))["error"] == "confirmation_required"  # a no is not a yes
+    session.note_said("Just to confirm, Jane Wilson, tomorrow at ten for a cleaning. Is that correct?")
+    session.note_heard("Yeah, that's right")
+    assert run(session.book_appointment(*args))["status"] == "booked"
+
+
+def test_emergency_booking_skips_the_readback(session):
+    option = run(session.check_availability(session.tomorrow.date().isoformat(), "any"))["options"][0]
+    session.note_heard("My name is Jane Wilson")
+    assert run(session.book_appointment("Jane Wilson", "5125550199", "Swelling", True, True, option["slot_id"]))["status"] == "booked"
+
+
+def test_unsearched_availability_claim_is_flagged():
+    from app.guards import PromiseGuard
+
+    g = PromiseGuard()
+    assert g.check("The three PM slot isn't available. Would you like a morning time?", False, 0, searched=False) == "unsearched"
+    assert g.check("The three PM slot isn't available.", False, 0, searched=True) is None  # a search ran this turn
+    assert g.check("We're closed on Sundays.", False, 0, searched=False) is None
+
+
+def test_booking_needs_the_number_question_and_never_books_a_garbled_caller_id(session):
+    """Found by conversation_eval: Mia booked without asking about the number, and once read the caller ID back wrong (+5122...)."""
+    option = run(session.check_availability(session.tomorrow.date().isoformat(), "any"))["options"][0]
+    session.note_heard("Jane Wilson")
+    session.note_said("Just to confirm, Jane Wilson, tomorrow at nine. Is that correct?")
+    session.note_heard("Yes")
+    args = ("Jane Wilson", "5125550199", "Cleaning", True, False, option["slot_id"])
+    assert run(session.book_appointment(*args))["error"] == "phone_not_confirmed"  # nobody asked about the number
+    session.note_said("Is the number you're calling from the best one to reach you?")
+    session.note_said("Just to confirm, Jane Wilson, tomorrow at nine. Is that correct?")
+    session.note_heard("Yes")
+    garbled = ("Jane Wilson", "5155550199", "Cleaning", True, False, option["slot_id"])  # one digit off the caller ID
+    assert run(session.book_appointment(*garbled))["status"] == "booked"
+    assert session.calcom.bookings[-1][2] == "+15125550199"  # the caller ID, not the garbled digits
