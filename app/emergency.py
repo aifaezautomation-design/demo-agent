@@ -18,7 +18,13 @@ import json
 import re
 
 from loguru import logger
-from pipecat.frames.frames import EagerTranscriptionFrame, Frame, LLMMessagesAppendFrame, TranscriptionFrame, TTSSpeakFrame
+from pipecat.frames.frames import (
+    EagerTranscriptionFrame,
+    Frame,
+    LLMMessagesAppendFrame,
+    TranscriptionFrame,
+    TTSSpeakFrame,
+)
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 # Phrases like "no pain", "not an emergency", "doesn't have any swelling" must not count.

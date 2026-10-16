@@ -53,6 +53,11 @@ _ep = os.getenv("DEEPGRAM_ENDPOINTING_MS", "")
 DEEPGRAM_ENDPOINTING_MS = int(_ep) if _ep else None
 # Silence before voice-activity detection ends a turn (seconds); Smart Turn then confirms.
 VAD_STOP_SECS = float(os.getenv("VAD_STOP_SECS", "0.2"))
+# Smart Turn judges from the audio whether the caller is done. When it says "not yet" (a hesitant "I think... today"), it waits
+# this long in silence before ending the turn anyway. Pipecat's default is 3 s, which a real caller felt as a 5 s delay.
+SMART_TURN_STOP_SECS = float(os.getenv("SMART_TURN_STOP_SECS", "1.0"))
+# If a turn gets cut by a late transcript fragment and no stop signal follows, how long until it is closed (default 5 s).
+USER_TURN_STOP_TIMEOUT = float(os.getenv("USER_TURN_STOP_TIMEOUT", "1.5"))
 # Seconds of caller silence before "Are you still there?"; a second stretch ends the call. Never counted during a tool call.
 # Seconds after a caller's turn with no reply of any kind before the model is re-prompted.
 STALL_SECS = float(os.getenv("STALL_SECS", "6"))

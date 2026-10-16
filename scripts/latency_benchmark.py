@@ -55,6 +55,9 @@ if os.environ.get("BENCH_SET") == "book":  # one whole booking call; the answers
         "Yes, that's correct.",
         "No, that's all, thank you. Goodbye.",
     ]
+elif os.environ.get("BENCH_SET") == "hesitant":  # trailing, unfinished-sounding phrases, which Smart Turn waits on
+    QUESTIONS = ["Um, I think, maybe today.", "Yeah, I would like a, uh, cleaning, I guess.", "I think... tomorrow, maybe.",
+                 "So, I was wondering if, um, you take Delta Dental."]
 elif os.environ.get("BENCH_SET") == "tools":  # every one of these makes Mia look at the calendar
     QUESTIONS = [
         "I'm a new patient and I need a cleaning. Do you have anything tomorrow morning?",

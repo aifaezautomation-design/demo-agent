@@ -13,6 +13,8 @@ import uuid
 from fastapi import WebSocket
 from loguru import logger
 from openai import AsyncOpenAI
+from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
@@ -24,15 +26,18 @@ from pipecat.frames.frames import (
     LLMTextFrame,
     TTSSpeakFrame,
 )
-from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.service_switcher import ServiceSwitcher, ServiceSwitcherStrategyManual
+from pipecat.pipeline.service_switcher import (
+    ServiceSwitcher,
+    ServiceSwitcherStrategyManual,
+)
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
+from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.runner.types import TelnyxCallData
 from pipecat.serializers.telnyx import TelnyxFrameSerializer
 from pipecat.services.cartesia.tts import CartesiaTTSService, GenerationConfig
@@ -40,14 +45,21 @@ from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.tts_service import TextAggregationMode
-from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
+from pipecat.transports.websocket.fastapi import (
+    FastAPIWebsocketParams,
+    FastAPIWebsocketTransport,
+)
+from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
+    TurnAnalyzerUserTurnStopStrategy,
+)
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
 from app import config, db
 from app import language as language_module
 from app.db import Tenant
-from app.guards import NOTES, PromiseGuard, broke_promise  # noqa: F401  (broke_promise is re-exported for tests)
 from app.emergency import EmergencyTriage
+from app.guards import NOTES, PromiseGuard, broke_promise  # noqa: F401  (broke_promise is re-exported for tests)
 from app.language import LanguageDetector
 from app.prompts import build_system_prompt
 from app.tools import CallSession
@@ -92,6 +104,14 @@ class _SpokeTracker(FrameProcessor):
                 self.nudges += 1
                 asyncio.ensure_future(self.on_broken_promise(self.text.strip(), NOTES[kind]))
         await self.push_frame(frame, direction)
+
+
+def _turn_strategies() -> UserTurnStrategies | None:
+    """Smart Turn with a short silence cap. None for Flux, which decides the end of the turn itself."""
+    if config.DEEPGRAM_STT == "flux" and not config.MULTILINGUAL_ENABLED:
+        return None
+    analyzer = LocalSmartTurnAnalyzerV3(params=SmartTurnParams(stop_secs=config.SMART_TURN_STOP_SECS))
+    return UserTurnStrategies(stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=analyzer)])
 
 
 def _greeting(tenant: Tenant) -> str:
@@ -236,6 +256,8 @@ async def run_call(
             # end-of-turn from audio, rather than waiting on long silences.
             vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=config.VAD_STOP_SECS)),
             user_idle_timeout=config.USER_IDLE_SECS,
+            user_turn_stop_timeout=config.USER_TURN_STOP_TIMEOUT,
+            user_turn_strategies=_turn_strategies(),
         ),
     )
 

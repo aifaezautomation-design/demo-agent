@@ -13,7 +13,11 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
-from pipecat.frames.frames import EndWorkerFrame, FunctionCallResultProperties, TTSSpeakFrame
+from pipecat.frames.frames import (
+    EndWorkerFrame,
+    FunctionCallResultProperties,
+    TTSSpeakFrame,
+)
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 
 from app import config, db, notify

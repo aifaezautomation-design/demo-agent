@@ -81,3 +81,16 @@ def test_multilingual_graph_adds_detector_and_switcher(monkeypatch):
     seen = _graph(monkeypatch, multilingual=True)
     assert "LanguageDetector" in seen["processors"] and "ServiceSwitcher" in seen["processors"]
     assert "DeepgramFluxSTTService" not in seen["processors"]  # multilingual runs on nova-3, inside the switcher
+
+
+def test_smart_turn_waits_at_most_a_second_on_nova(monkeypatch):
+    """A real caller waited ~5 s: Smart Turn's default is to sit through 3 s of silence whenever it thinks the caller is not done."""
+    from app import bot, config
+
+    monkeypatch.setattr(config, "DEEPGRAM_STT", "nova")
+    strategies = bot._turn_strategies()
+    analyzer = strategies.stop[0]._turn_analyzer
+    assert analyzer._params.stop_secs == config.SMART_TURN_STOP_SECS <= 1.0
+    assert config.USER_TURN_STOP_TIMEOUT <= 2.0
+    monkeypatch.setattr(config, "DEEPGRAM_STT", "flux")
+    assert bot._turn_strategies() is None  # Flux ends the turn itself
