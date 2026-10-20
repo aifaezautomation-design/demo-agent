@@ -29,7 +29,7 @@ from app import config, db
 from app.bot import run_bot
 from app.tools import normalize_phone
 
-app = FastAPI(title="Boltex Dental Voice Agent")
+app = FastAPI(title="Boltix Dental Voice Agent")
 
 if not config.TELNYX_PUBLIC_KEY:
     # Without signature checks, anyone who finds this URL can fetch TeXML

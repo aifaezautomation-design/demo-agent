@@ -34,7 +34,13 @@ _NEGATED = re.compile(
     re.I,
 )
 # A hypothetical or a question about the service is not a report ("what if my tooth gets knocked out?").
-_HYPOTHETICAL = re.compile(r"\b(if|what happens|what would|in case|hypothetical|someday|in general|do you (treat|handle|do|see))\b", re.I)
+# Also a practice manager testing the demo ("can you handle a patient who has a broken tooth?").
+_HYPOTHETICAL = re.compile(
+    r"\b(if|what happens|what would|in case|hypothetical|someday|in general|do you (treat|handle|do|see)|"
+    r"can you (treat|handle|deal with|manage)|how (do|would|will|does) (you|it|mia|she) (handle|deal|manage|treat|respond)|"
+    r"(a|the) patient (who|that|with|calls)|patients (who|that|with|call))\b",
+    re.I,
+)
 _FIRST_PERSON = re.compile(r"\b(i|i'm|i've|my|me|we|our|he|she|his|her|him|my (son|daughter|kid|child|wife|husband|mom|dad|mother|father))\b", re.I)
 
 _AIRWAY = re.compile(

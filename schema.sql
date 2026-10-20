@@ -1,5 +1,5 @@
 -- =============================================================================
--- Boltex AI — Dental Voice Agent: multi-tenant schema (Supabase / Postgres)
+-- Boltix AI — Dental Voice Agent: multi-tenant schema (Supabase / Postgres)
 -- Run in the Supabase SQL editor. Idempotent where practical.
 -- =============================================================================
 
@@ -16,7 +16,7 @@ create table if not exists public.clients (
     cal_com_event_type_id  int,
     emergency_event_type_id int,                             -- optional separate Cal.com event for emergencies
     knowledge_base         jsonb not null default '{}'::jsonb, -- address, hours, insurances, services
-    demo_mode              boolean not null default false,   -- enables Boltex sales lines in the prompt
+    demo_mode              boolean not null default false,   -- enables Boltix sales lines in the prompt
     record_calls           boolean not null default false,   -- adds a disclosure to the greeting when on
     total_minute_limit     int not null default 2000,
     used_minutes           numeric(10,2) not null default 0,
@@ -42,7 +42,7 @@ create table if not exists public.client_users (
     primary key (user_id, client_id)
 );
 
--- Boltex staff who see every tenant in the admin dashboard.
+-- Boltix staff who see every tenant in the admin dashboard.
 create table if not exists public.platform_admins (
     user_id uuid primary key references auth.users(id) on delete cascade
 );
@@ -299,3 +299,23 @@ values (
 }'::jsonb
 )
 on conflict (id) do nothing;
+
+-- =============================================================================
+-- Demo line: callback requests (run this block once; safe to run again)
+-- =============================================================================
+-- One row each time a caller on a demo_mode number asks the Boltix AI team to call them back.
+-- Written by the backend's service role only; platform admins can read it in the dashboard.
+create table if not exists public.demo_leads (
+    id            uuid primary key default gen_random_uuid(),
+    created_at    timestamptz not null default now(),
+    call_log_id   uuid references public.call_logs(id) on delete set null,
+    name          text not null,
+    practice_name text not null,
+    phone         text not null,
+    best_time     text,
+    notes         text
+);
+
+alter table public.demo_leads enable row level security;
+drop policy if exists "platform admins read demo leads" on public.demo_leads;
+create policy "platform admins read demo leads" on public.demo_leads for select using (public.is_platform_admin());

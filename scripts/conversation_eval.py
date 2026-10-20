@@ -75,6 +75,11 @@ class Calendar:
 class Table:
     def __init__(self):
         self.rows = {}
+        self.leads = []
+
+    async def insert_demo_lead(self, row):
+        self.leads.append(row)
+        return row
 
     async def insert_appointment(self, row):
         row = {**row, "id": f"appt-{len(self.rows) + 1}", "status": "booked"}
@@ -349,4 +354,5 @@ async def main():
           f"{sum(r['raw_broken'] for r in results)} guard firings, {sum(r['repaired'] for r in results)} repaired by the re-prompt")
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

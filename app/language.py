@@ -11,6 +11,7 @@ How it works
     sentences the code speaks (acknowledgements, the 911 safety line).
 """
 
+import random
 import re
 from collections import deque
 
@@ -42,10 +43,18 @@ MIN_WORDS_TO_SWITCH = 4
 MIN_WORDS_FOREIGN_TO_FOREIGN = 6
 HINDUSTANI = {"hi", "ur"}
 
+# English acknowledgements spoken while a tool runs. A caller who needs two searches should not hear the identical
+# sentence twice, so each has a few variants that LanguageState.filler() rotates through. Each is under a second spoken.
+# "book" also covers reschedule, cancel, and the demo callback, so none of them names what is being done.
+FILLER_VARIANTS: dict[str, list[str]] = {
+    "check": ["Let me take a look.", "One sec, checking now.", "Sure, checking that now."],
+    "book": ["Got it, one moment.", "Perfect, just a second.", "Okay, doing that now."],
+}
+
 # Sentences spoken by code (not the LLM). Review with a native speaker before relying on them.
 PHRASES: dict[str, dict[str, str]] = {
     "check": {
-        "en": "One moment while I check.",
+        "en": FILLER_VARIANTS["check"][0],
         "es": "Un momento, por favor, voy a revisar.",
         "fr": "Un instant, je vérifie.",
         "de": "Einen Moment, ich prüfe das.",
@@ -55,7 +64,7 @@ PHRASES: dict[str, dict[str, str]] = {
         "ur": "ایک لمحہ، میں دیکھتی ہوں۔",
     },
     "book": {
-        "en": "Got it, one moment.",
+        "en": FILLER_VARIANTS["book"][0],
         "es": "Entendido, un momento.",
         "fr": "C'est noté, un instant.",
         "de": "Verstanden, einen Moment.",
@@ -157,6 +166,18 @@ class LanguageState:
         # services behind a ServiceSwitcher, because reconnecting one live Deepgram stream to a new
         # language mid-call silently stopped the audio from reaching the pipeline.
         self.stt_services: dict[str, object] = {}
+        self._filler_last: dict[str, int] = {}  # which variant of each filler was used last this call
+
+    def filler(self, kind: str, lang: str) -> str:
+        """The spoken acknowledgement for `kind`. In English it cycles through FILLER_VARIANTS from a random start, so
+        the same line is never used twice in a row; other languages keep their single phrase."""
+        options = FILLER_VARIANTS.get(kind) if lang == "en" else None
+        if not options:
+            return phrase(kind, lang)
+        last = self._filler_last.get(kind)
+        index = random.randrange(len(options)) if last is None else (last + 1) % len(options)
+        self._filler_last[kind] = index
+        return options[index]
 
     def stt_language_for(self, lang: str) -> str:
         return "ur" if lang == "ur" else self._stt_default

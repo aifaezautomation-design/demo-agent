@@ -117,6 +117,13 @@ def test_normalize_phone():
     assert normalize_phone("") is None
 
 
+def test_midday_is_spoken_as_people_say_it():
+    assert spoken_time(datetime(2026, 10, 27, 12, 0, tzinfo=TZ)) == "Tuesday, October 27 at noon"
+    assert spoken_time(datetime(2026, 10, 27, 12, 30, tzinfo=TZ)) == "Tuesday, October 27 at 12:30 in the afternoon"
+    assert spoken_time(datetime(2026, 10, 27, 0, 0, tzinfo=TZ)).endswith("at 12 AM")  # outside hours, but not "noon"
+    assert spoken_time(datetime(2026, 10, 27, 13, 0, tzinfo=TZ)).endswith("at 1 PM")
+
+
 def test_spoken_time():
     assert spoken_time(datetime(2026, 10, 15, 9, 0, tzinfo=TZ)) == "Thursday, October 15 at 9 AM"
     assert spoken_time(datetime(2026, 10, 15, 14, 30, tzinfo=TZ)) == "Thursday, October 15 at 2:30 PM"
@@ -125,8 +132,8 @@ def test_spoken_time():
 def test_prompt_renders_and_respects_demo_mode():
     demo = build_system_prompt(make_tenant(demo_mode=True), "+15125550199")
     prod = build_system_prompt(make_tenant(demo_mode=False), "+15125550199")
-    assert "Boltex AI" in demo and "Fillings: $180–$350" in demo
-    assert "Boltex" not in prod
+    assert "Boltix AI" in demo and "Fillings: $180–$350" in demo
+    assert "Boltex" not in prod and "Boltix" not in prod
 
 
 def test_availability_filters_by_time_of_day(session):
@@ -621,7 +628,7 @@ def test_slots_outside_opening_hours_are_never_offered(session):
     day = _at(2030, 1, 9, 0)  # a Wednesday
     session.calcom.slots = [day.replace(hour=h) for h in (7, 8, 12, 18, 19, 20)]
     options = session._offer(session._open_hours(session.calcom.slots))["options"]
-    assert [o["spoken"].split(" at ")[1] for o in options] == ["8 AM", "12 PM", "6 PM"]
+    assert [o["spoken"].split(" at ")[1] for o in options] == ["8 AM", "noon", "6 PM"]
 
 
 def test_an_after_hours_emergency_is_flagged_not_booked(session, monkeypatch):

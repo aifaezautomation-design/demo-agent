@@ -1,4 +1,4 @@
-# Boltex AI — Dental Voice Agent (Phase 1)
+# Boltix AI — Dental Voice Agent (Phase 1)
 
 "Mia", an inbound phone receptionist for dental practices. She books, reschedules, and cancels appointments, triages emergencies, writes to Cal.com, and logs every call to Supabase. One deployment serves every practice; the dialed number decides which practice a call belongs to.
 
@@ -34,7 +34,7 @@ Caller ─PSTN─▶ Telnyx ──POST /telnyx/texml──▶ tenant lookup by d
 2. **Cal.com.** Create an event type per practice (and optionally a separate emergency event type), and note its numeric ID.
 3. **Railway.** Deploy this repo (it builds the Dockerfile). Set the variables from `.env.example`. In service settings, pick the US East (Virginia) region and set a generous deploy draining time so redeploys don't cut live calls.
 4. **Telnyx.** Create a TeXML application with the voice webhook `https://<PUBLIC_HOST>/telnyx/texml` (POST), assign the practice's number to it, and copy your account public key into `TELNYX_PUBLIC_KEY`.
-5. **Dashboard login.** For each practice user: `insert into client_users (user_id, client_id, role) values ('<auth uuid>', 'apex-dental', 'owner');`. Boltex staff go in `platform_admins`.
+5. **Dashboard login.** For each practice user: `insert into client_users (user_id, client_id, role) values ('<auth uuid>', 'apex-dental', 'owner');`. Boltix staff go in `platform_admins`.
 
 Run locally: `uvicorn app.server:app --port 8000`, exposed with a tunnel (ngrok or cloudflared) and `PUBLIC_HOST` set to the tunnel's host.
 
@@ -51,7 +51,7 @@ Insert a `clients` row (number, timezone, Cal.com event type, `knowledge_base` J
 - **Billing is atomic and idempotent.** `finalize_call()` closes the call log and deducts minutes in one transaction, and runs at most once per call. Calls to a practice that is out of minutes are refused at the TeXML step, before any AI cost.
 - **Patients are never emailed or texted.** (The practice does get one staff notification email per booking, see below.) The booking API version `2026-02-25` makes attendee email optional, and none is sent. Also turn off attendee notifications on each Cal.com event type.
 - **Recording is opt-in per practice** (`clients.record_calls`). When it's on, Mia's greeting discloses it, because recording consent laws differ by state. Files are copied into a private Supabase bucket, since Telnyx recording links expire.
-- **The Boltex pitch only plays in demo mode** (`clients.demo_mode`). Production practices get an honest AI disclosure without a sales pitch.
+- **The Boltix AI product pitch only plays in demo mode** (`clients.demo_mode`). Production practices get an honest AI disclosure without a sales pitch. What Mia may say about herself and Boltix AI (price model, setup, privacy, next step) is one dict, `app/demo_facts.py`: edit the strings there, nothing else. Demo mode also adds the `request_boltix_callback` tool (a manager asks the team to call them; saved in `demo_leads` and emailed to `BOLTIX_LEADS_EMAIL`) and a report email after each call.
 
 ## Latency
 
@@ -96,7 +96,7 @@ Transcripts and recordings are PHI. You need BAAs with Telnyx, Deepgram, OpenAI,
 
 | Variable | Default | What it does |
 |---|---|---|
-| `DEEPGRAM_STT` | `flux` | `flux` = Deepgram Flux (English): it ends the caller's turn itself and starts the LLM while the last words are still being finalised, about 0.25-0.3 s faster on ordinary turns (no change on calendar-lookup turns). `nova` = Deepgram nova-3 with Pipecat's own turn detection: the one-line rollback |
+| `DEEPGRAM_STT` | `nova` | `nova` = Deepgram nova-3 with Pipecat's own turn detection (the default, proven on real phone calls). `flux` = Deepgram Flux (English), opt-in: it ends the caller's turn itself, but produced no turns on a real call |
 | `FLUX_EAGER_EOT_THRESHOLD` / `FLUX_EOT_THRESHOLD` | `0.5` / `0.7` | How sure Flux must be to start the LLM early / to end the turn. More aggressive values made no difference in testing |
 | `FLUX_EOT_TIMEOUT_MS` | `2000` | Longest silence before the turn ends whatever the confidence (Flux's own default is 5000) |
 | `OPENAI_MODEL` / `OPENAI_TEMPERATURE` / `OPENAI_MAX_TOKENS` | `gpt-4o-mini` / `0.3` / `150` | Real replies average about 30 tokens and peak near 65, so the bound only cuts off a runaway answer. Temperature does not change latency |
@@ -104,6 +104,8 @@ Transcripts and recordings are PHI. You need BAAs with Telnyx, Deepgram, OpenAI,
 | `CARTESIA_VOLUME` | `1.4` | Voice volume, 0.5 to 2.0 (clips above about 1.5) |
 | `CARTESIA_STREAM_TOKENS` | `0` | Token-by-token text to the voice. Measured: it made the first audio *slower* (0.58 s vs 0.33 s), so leave it off |
 | `VAD_STOP_SECS` | `0.2` | Silence before voice-activity detection ends a turn (nova only) |
+| `SMART_TURN_STOP_SECS` / `USER_TURN_STOP_TIMEOUT` | `1.0` / `1.5` | The longest silence Smart Turn waits through when it thinks the caller is not done / when a turn gets stuck (Pipecat's defaults of 3 s and 5 s felt like a 5 s delay) |
+| `BOLTIX_LEADS_EMAIL` | empty | Demo line only: where to email a note for each callback request and a report (summary and transcript) after every demo call. Empty, or no `RESEND_API_KEY`, turns them off |
 
 ## Latency: what was measured
 

@@ -147,6 +147,13 @@ async def flag_urgent_callback(call_id: str, reason: str) -> None:
     )
 
 
+async def insert_demo_lead(row: dict) -> dict:
+    """A callback request taken on the demo line (table demo_leads, see schema.sql)."""
+    db = await get_db()
+    res = await db.table("demo_leads").insert(row).execute()
+    return res.data[0]
+
+
 async def insert_appointment(row: dict) -> dict:
     db = await get_db()
     res = await db.table("appointments").insert(row).execute()

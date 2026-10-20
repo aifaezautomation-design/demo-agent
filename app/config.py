@@ -14,7 +14,7 @@ def _require(name: str) -> str:
     return value
 
 
-# Public URL Railway assigns, e.g. "voice.boltex.ai" (no scheme).
+# Public URL Railway assigns, e.g. "voice.boltixai.com" (no scheme).
 PUBLIC_HOST = _require("PUBLIC_HOST")
 # Shared secret embedded in the media-stream URL so only our TeXML can open /ws.
 WS_AUTH_TOKEN = _require("WS_AUTH_TOKEN")
@@ -87,6 +87,10 @@ DEEPGRAM_STT = os.getenv("DEEPGRAM_STT", "nova")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 NOTIFY_EMAIL_TO = os.getenv("NOTIFY_EMAIL_TO", "")
 NOTIFY_EMAIL_FROM = os.getenv("NOTIFY_EMAIL_FROM", "Mia Receptionist <onboarding@resend.dev>")
+
+# Where demo-line emails go: one per callback request and one after every demo call (summary and transcript).
+# Empty (or no RESEND_API_KEY) turns them off. Only used when the practice has demo_mode on.
+BOLTIX_LEADS_EMAIL = os.getenv("BOLTIX_LEADS_EMAIL", "")
 
 # Reply length bound, in tokens. Real calls average ~30 and peak ~65; a spoken turn is one or two sentences, so this
 # only ever cuts off a runaway answer.

@@ -24,12 +24,17 @@ from app import config, db, notify
 from app import language as language_module
 from app.calcom import CalCom, CalComError
 from app.db import Tenant
+from app.emergency import classify
 
 _MAX_OPTIONS = 12  # the day's times, so the model never claims a time is taken because it saw only a sample; the prompt tells it to offer two
 _SEARCH_DAYS = 7
 _EMERGENCY_WINDOW = timedelta(hours=2)
 _EMERGENCY_SEARCH = timedelta(hours=48)
 _MIN_LEAD_TIME = timedelta(minutes=30)
+# Openings are loaded once while the greeting plays, so the first calendar question skips the Cal.com round trip
+# (about 0.8 s). The copy is used for up to two minutes, and dropped after any booking, change, or cancellation.
+_PREFETCH_DAYS = 14
+_PREFETCH_MAX_AGE_SECS = 120.0
 
 
 def phone_matches_caller_id(phone: str | None, caller: str | None) -> bool:
@@ -49,9 +54,13 @@ def normalize_phone(raw: str | None) -> str | None:
 
 
 def spoken_time(dt: datetime) -> str:
+    """'Tuesday, October 27 at 1 PM'. Midday is spoken as people say it: 'noon', and 12:30 as '12:30 in the afternoon'."""
+    day = f"{dt:%A, %B} {dt.day}"
+    if dt.hour == 12:
+        return f"{day} at noon" if dt.minute == 0 else f"{day} at 12:{dt.minute:02d} in the afternoon"
     hour = dt.hour % 12 or 12
     minutes = "" if dt.minute == 0 else f":{dt.minute:02d}"
-    return f"{dt:%A, %B} {dt.day} at {hour}{minutes} {'AM' if dt.hour < 12 else 'PM'}"
+    return f"{day} at {hour}{minutes} {'AM' if dt.hour < 12 else 'PM'}"
 
 
 _WEEKDAYS = {
@@ -196,6 +205,28 @@ def is_affirmative(heard: str) -> bool:
     return bool(_YES.search(heard)) and not _NO.search(heard.strip())
 
 
+# Insults aimed at Mia. A patient who swears about pain, a tooth, a dentist or themselves ("this stupid tooth is killing
+# me", "the pain is shit", "I feel so dumb") must never be counted, or Mia could hang up on an emergency. So an insult
+# word counts only when it sits within a couple of words of a word that points at her, or is a direct attack by itself.
+_INSULT = r"(stupid|idiot|moron|useless|worthless|garbage|trash|pathetic|dumb|shit+y?|crap+y?|bitch|asshole|bastard|suck|sucks)"
+_AT_MIA = r"(you|you're|youre|your|ur|u|robot|bot|ai|mia|machine)"
+_GAP = r"(?:[\w']+[\s,]+){0,2}"
+_AIMED = re.compile(
+    rf"(?<![\w'])(?:{_AT_MIA}[\s,]+{_GAP}{_INSULT}|{_INSULT}[\s,]+{_GAP}{_AT_MIA})(?![\w'])", re.I
+)
+_DIRECT = re.compile(r"(?<![\w'])(shut up|screw you|f+u+c+k+ (you|off|u)|go to hell|piece of shit,? you)", re.I)
+_THANKS = re.compile(r"(thank you|thanks to you|bless you|love you)", re.I)
+
+
+def is_abusive(text: str) -> bool:
+    """True when a sentence insults Mia herself. Sentences are judged one at a time."""
+    for sentence in re.split(r"[.!?;]+", text):
+        sentence = _THANKS.sub(" ", sentence).strip()
+        if sentence and (_DIRECT.search(sentence) or _AIMED.search(" " + sentence + " ")):
+            return True
+    return False
+
+
 def spoken_day(d: date) -> str:
     return f"{d:%A, %B} {d.day}"
 
@@ -240,6 +271,44 @@ class CallSession:
         self.heard: list[str] = []
         self.appointment_booked = False
         self.writes = 0  # bookings, reschedules and cancellations really saved this call
+        # Demo line only: the callback request the caller made, if any (see request_boltix_callback).
+        self.callback: dict | None = None
+        self.abuse_strikes = 0  # caller messages that insulted Mia herself (demo line: the second one ends the call)
+        self.emergency_seen = False  # an emergency/airway triage happened in this call: strikes stop and never end the call
+        # (fetched_at, event_type_id, start, end, task) from prefetch_slots, or None.
+        self._prefetch: tuple[float, int, datetime, datetime, asyncio.Task] | None = None
+
+    # ------------------------------------------------------------------ calendar cache
+
+    def prefetch_slots(self) -> None:
+        """Starts loading the next two weeks of openings in the background (called when the call starts)."""
+        if not self.calcom or not self.tenant.cal_com_event_type_id:
+            return
+        now = datetime.now(self.tz)
+        end = datetime.combine(now.date() + timedelta(days=_PREFETCH_DAYS), time.min, self.tz)
+        event_type = self.tenant.cal_com_event_type_id
+        task = asyncio.ensure_future(self.calcom.get_slots(event_type, now, end, self.tenant.timezone))
+        task.add_done_callback(lambda t: None if t.cancelled() else t.exception())  # no "never retrieved" warning
+        self._prefetch = (time_module.monotonic(), event_type, now, end, task)
+
+    def _drop_prefetch(self) -> None:
+        self._prefetch = None
+
+    async def _get_slots(self, event_type: int, start: datetime, end: datetime) -> list[datetime]:
+        """Openings from the prefetched copy when it covers the request and is fresh; otherwise straight from Cal.com."""
+        calcom = self._require_calendar()
+        pf = self._prefetch
+        if pf:
+            fetched_at, pf_type, pf_start, pf_end, task = pf
+            if (pf_type == event_type and start >= pf_start and end <= pf_end
+                    and time_module.monotonic() - fetched_at < _PREFETCH_MAX_AGE_SECS):
+                try:
+                    slots = await asyncio.shield(task)
+                    return [s for s in slots if start <= s < end]
+                except Exception as e:
+                    logger.warning(f"[{self.call_id}] prefetched slots unusable ({e!r}); asking Cal.com directly")
+                    self._drop_prefetch()
+        return await calcom.get_slots(event_type, start, end, self.tenant.timezone)
 
     # ------------------------------------------------------------------ setup
 
@@ -314,6 +383,7 @@ class CallSession:
                     required=["reason"],
                 ),
                 *self._language_tool(),
+                *self._demo_tools(),
                 FunctionSchema(
                     name="end_call",
                     description="Say goodbye and hang up.",
@@ -322,6 +392,28 @@ class CallSession:
                 ),
             ]
         )
+
+    def _demo_tools(self) -> list[FunctionSchema]:
+        """Tools that exist only on the demo line. A production practice never sees them."""
+        if not self.tenant.demo_mode:
+            return []
+        return [
+            FunctionSchema(
+                name="request_boltix_callback",
+                description=(
+                    "Demo line only: save a request for the Boltix AI team to call this caller back. "
+                    "Call it only after the caller said yes to the read-back of their name, practice and number."
+                ),
+                properties={
+                    "name": {"type": "string", "description": "The caller's name, exactly as they said it."},
+                    "practice_name": {"type": "string", "description": "The name of the caller's practice."},
+                    "phone_number": {"type": "string", "description": "Number to call back: the caller ID or one the caller said."},
+                    "best_time": {"type": "string", "description": "When they prefer a call, in their words. Optional."},
+                    "notes": {"type": "string", "description": "What they are interested in. Optional."},
+                },
+                required=["name", "practice_name", "phone_number"],
+            )
+        ]
 
     def _language_tool(self) -> list[FunctionSchema]:
         if not config.MULTILINGUAL_ENABLED:
@@ -346,6 +438,8 @@ class CallSession:
         }
         if config.MULTILINGUAL_ENABLED:
             handlers["set_language"] = self.set_language
+        if self.tenant.demo_mode:
+            handlers["request_boltix_callback"] = self.request_boltix_callback
         for name, handler in handlers.items():
             llm.register_function(name, self._wrap(name, handler), timeout_secs=12)
         llm.register_function("end_call", self.end_call)
@@ -353,6 +447,11 @@ class CallSession:
     @property
     def wrote(self) -> bool:
         return self.writes > 0
+
+    @property
+    def abuse_count(self) -> int:
+        """Strikes that count toward ending the call: none once an emergency has been reported."""
+        return 0 if self.emergency_seen else self.abuse_strikes
 
     @property
     def busy(self) -> bool:
@@ -417,6 +516,10 @@ class CallSession:
     def note_heard(self, text: str) -> None:
         self.heard.append(text)
         self.turn_searched = False  # a new caller turn: any availability claim now needs a fresh search
+        if classify(text):  # an emergency or airway report: a patient in pain is never "rude", whatever they say
+            self.emergency_seen = True
+        elif not self.emergency_seen and is_abusive(text):
+            self.abuse_strikes += 1
 
     def note_said(self, text: str) -> None:
         self.said.append(text)
@@ -505,7 +608,7 @@ class CallSession:
 
         start = max(datetime.combine(day, time.min, self.tz), now + _MIN_LEAD_TIME)
         end = datetime.combine(day + timedelta(days=_SEARCH_DAYS), time.min, self.tz)
-        slots = await calcom.get_slots(self.tenant.cal_com_event_type_id, start, end, self.tenant.timezone)
+        slots = await self._get_slots(self.tenant.cal_com_event_type_id, start, end)
         slots = self._open_hours(s.astimezone(self.tz) for s in slots)
         part_of_day_missed = False
         if wanted is None:  # a named time beats a vague part of the day
@@ -563,8 +666,9 @@ class CallSession:
         One calendar request covers all three. When nothing is open today, the urgent callback is
         flagged here, in code, so it never depends on the LLM remembering to do it.
         """
+        self.emergency_seen = True
         event_type = self.tenant.emergency_event_type_id or self.tenant.cal_com_event_type_id
-        slots = await calcom.get_slots(event_type, now, now + _EMERGENCY_SEARCH, self.tenant.timezone)
+        slots = await self._get_slots(event_type, now, now + _EMERGENCY_SEARCH)
         slots = self._open_hours(s.astimezone(self.tz) for s in slots if s >= now)
 
         within_two_hours = [s for s in slots if s <= now + _EMERGENCY_WINDOW]
@@ -652,7 +756,7 @@ class CallSession:
                 patient_name,
                 phone,
                 self.tenant.timezone,
-                metadata={"visit_reason": visit_reason[:500], "source": "boltex-voice", "call_id": self.call_id},
+                metadata={"visit_reason": visit_reason[:500], "source": "boltix-voice", "call_id": self.call_id},
             )
             row = {
                 "client_id": self.tenant.id,
@@ -688,6 +792,7 @@ class CallSession:
             except Exception:
                 logger.exception(f"[{self.call_id}] booking email could not be scheduled")
 
+        self._drop_prefetch()  # the calendar is about to change: later searches must see it fresh
         try:
             await asyncio.shield(write())
         except CalComError as e:
@@ -759,6 +864,7 @@ class CallSession:
             # The calendar is already updated; our own record follows behind the reply.
             self._background(lambda: db.update_appointment(self.tenant.id, appointment_id, changes), f"reschedule {appointment_id}")
 
+        self._drop_prefetch()
         try:
             await asyncio.shield(write())
         except CalComError as e:
@@ -781,6 +887,7 @@ class CallSession:
                 lambda: db.update_appointment(self.tenant.id, appointment_id, {"status": "cancelled"}), f"cancel {appointment_id}"
             )
 
+        self._drop_prefetch()
         await asyncio.shield(write())
         self.writes += 1
         return {"status": "cancelled"}
@@ -794,6 +901,64 @@ class CallSession:
         else:
             self.language_state.current = code
         return {"status": "ok", "language": code, "say": "Reply in this language from now on."}
+
+    async def request_boltix_callback(
+        self,
+        name: str,
+        practice_name: str,
+        phone_number: str,
+        best_time: str | None = None,
+        notes: str | None = None,
+    ) -> dict:
+        """Demo line: a practice manager asks the Boltix AI team to call them. Same guardrails as a booking: the name must
+        be one the caller said, the number the caller ID or one they said, and the caller must have said yes to the read-back."""
+        if not self.tenant.demo_mode:
+            return {"error": "not_available"}
+        if self.callback is not None:
+            return {"status": "saved", "say": "Already saved. Tell them: The Boltix AI team will give you a call back. Never say shortly or soon."}
+        name, practice = (name or "").strip(), (practice_name or "").strip()
+        if not practice or practice.lower() in _PLACEHOLDER_NAMES:
+            return {"error": "practice_not_given", "say": "Ask the caller, once, for the name of their practice."}
+        if not self._name_is_from_caller(name) and not (
+            name.lower() not in _PLACEHOLDER_NAMES and self._insist("name", name)
+        ):
+            return {"error": "name_not_confirmed", "say": "Ask the caller, once, to say their name, then use exactly what they say. Never guess or invent a name."}
+        if not self._caller_confirmed():
+            return {"error": "confirmation_required", "say": (
+                "The caller has not confirmed yet. In one sentence read back their name, practice, and number, then ask "
+                "\"Is that correct?\". Call this tool only after they say yes.")}
+        if not self._number_was_asked():
+            return {"error": "phone_not_confirmed", "say": (
+                "You have not asked about their number yet. Ask once: \"Is the number you're calling from the best one to "
+                "reach you?\" (do not read the digits aloud), and use the number they give or the caller ID.")}
+        phone = normalize_phone(phone_number) or self.caller_phone
+        if not phone:
+            return {"error": "missing_phone", "say": "Ask for the best number to reach them."}
+        phone = self._snap_to_caller_id(phone)
+        if not self._phone_is_from_caller(phone) and not self._insist("phone", phone):
+            return {"error": "phone_not_confirmed", "say": "Offer the caller ID as their number, or ask for the best number. Never guess one."}
+
+        lead = {
+            "call_log_id": self.call_id,
+            "name": name[:200],
+            "practice_name": practice[:200],
+            "phone": phone,
+            "best_time": (best_time or "").strip()[:200] or None,
+            "notes": (notes or "").strip()[:500] or None,
+        }
+        self.callback = lead
+        self.writes += 1  # counts as a saved write, so "the team will call you" is never flagged as an unsaved claim
+        self._background(lambda: db.insert_demo_lead(lead), "demo lead")
+        try:  # an email to Boltix AI: scheduled, never awaited, and never able to fail the tool
+            notify.notify_demo_lead(
+                notify.DemoLeadEmail(
+                    name=lead["name"], practice_name=lead["practice_name"], phone=phone,
+                    best_time=lead["best_time"] or "", notes=lead["notes"] or "", call_id=self.call_id,
+                )
+            )
+        except Exception:
+            logger.exception(f"[{self.call_id}] callback email could not be scheduled")
+        return {"status": "saved", "say": "Tell them: The Boltix AI team will give you a call back. Never say shortly or soon, and give no time."}
 
     async def flag_urgent_callback(self, reason: str) -> dict:
         self._flag_urgent(reason)

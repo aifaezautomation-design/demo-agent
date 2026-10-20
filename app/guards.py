@@ -34,6 +34,10 @@ _UNAVAILABLE = re.compile(
 )
 
 NOTES = {
+    "goodbye": (
+        "SYSTEM NOTE: the caller has now been rude or abusive twice. Say one polite goodbye and call end_call now. "
+        "Do not argue and do not offer anything else."
+    ),
     "promise": (
         "SYSTEM NOTE: you told the caller you would check or book, but you called no tool, so they are waiting in silence. "
         "Call the right tool now (check_availability for a day or time; book_appointment only when name, phone, reason and "
@@ -78,9 +82,11 @@ class PromiseGuard:
     def __init__(self):
         self.after_readback = False
 
-    def check(self, spoken: str, called_tool: bool, writes: int, searched: bool = True) -> str | None:
+    def check(self, spoken: str, called_tool: bool, writes: int, searched: bool = True, abuse: int = 0) -> str | None:
         spoken = spoken.strip()
         pending, self.after_readback = self.after_readback, False
+        if abuse >= 2 and not called_tool and spoken:
+            return "goodbye"  # the call must end; the model is asked once per caller turn, like every other guard
         if called_tool or not spoken:
             return None
         if is_readback(spoken):

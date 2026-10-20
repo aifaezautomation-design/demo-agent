@@ -55,7 +55,7 @@ from pipecat.turns.user_stop.turn_analyzer_user_turn_stop_strategy import (
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
-from app import config, db
+from app import config, db, notify
 from app import language as language_module
 from app.db import Tenant
 from app.emergency import EmergencyTriage
@@ -63,8 +63,22 @@ from app.guards import NOTES, PromiseGuard, broke_promise  # noqa: F401  (broke_
 from app.language import LanguageDetector
 from app.prompts import build_system_prompt
 from app.tools import CallSession
+from app.trimmer import OfferTrimmer
 
 PHONE_SAMPLE_RATE = 8000
+
+_SUMMARY = (
+    "Summarize this dental front-desk call in one or two sentences for clinic staff. "
+    "Include the patient's name, the intent (book/reschedule/cancel/emergency/question), the outcome, "
+    "and any follow-up needed. If the caller asked for a real person or a callback, say so clearly."
+)
+# The demo line is called by dental practice owners and managers trying Mia out; the summary is for the Boltix AI team.
+_SUMMARY_DEMO = (
+    "Summarize this call to a demo dental front desk in two or three sentences for the Boltix AI sales team. "
+    "Say whether the caller seemed to be a practice owner or manager (or a patient), what they asked about, the outcome "
+    "(for example a test booking or a callback request), and any follow-up needed. "
+    "If the caller asked for a real person or a callback, say so clearly."
+)
 _openai = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
 
 
@@ -81,6 +95,7 @@ class _SpokeTracker(FrameProcessor):
         self.on_broken_promise = None  # set by run_call, which owns the worker and the context
         self.searched_this_turn = lambda: True  # set by run_call; True means "do not second-guess availability claims"
         self.writes = lambda: 0  # set by run_call: bookings, changes and cancellations really saved so far
+        self.abuse = lambda: 0  # set by run_call: how many times the caller has insulted Mia (demo line only)
         self.on_said = None  # set by run_call: gets every spoken LLM reply the moment it ends
         self.last_activity = time.monotonic()
 
@@ -99,7 +114,7 @@ class _SpokeTracker(FrameProcessor):
         elif isinstance(frame, LLMFullResponseEndFrame):
             if self.on_said and self.text.strip():
                 self.on_said(self.text.strip())
-            kind = self.guard.check(self.text, self.called, self.writes(), self.searched_this_turn())
+            kind = self.guard.check(self.text, self.called, self.writes(), self.searched_this_turn(), self.abuse())
             if kind and self.on_broken_promise and self.nudges < 1:
                 self.nudges += 1
                 asyncio.ensure_future(self.on_broken_promise(self.text.strip(), NOTES[kind]))
@@ -116,6 +131,12 @@ def _turn_strategies() -> UserTurnStrategies | None:
 
 def _greeting(tenant: Tenant) -> str:
     disclosure = " This call may be recorded." if tenant.record_calls else ""
+    if tenant.demo_mode:
+        # Practice managers call the demo from an email: tell them up front what this is and what to try.
+        return (
+            f"Thanks for calling {tenant.name}. This is Mia, an AI receptionist built by Boltix AI.{disclosure} "
+            "Talk to me like a patient would, or ask me how I work. How can I help?"
+        )
     return f"Thanks for calling {tenant.name}, this is Mia.{disclosure} How can I help you today?"
 
 
@@ -232,6 +253,7 @@ async def run_call(
         db.create_call_log(tenant.id, caller_phone or "unknown", call_control_id, call_sid, call_id=call_id)
     )
     session = CallSession(tenant, call_id, caller_phone, call_log_ready)
+    session.prefetch_slots()  # calendar openings load while the greeting plays
     transcript: list[dict] = []
     log = logger.bind(call_id=call_id, client_id=tenant.id)
 
@@ -270,6 +292,7 @@ async def run_call(
             EmergencyTriage(session, session.language_state),
             aggregators.user(),
             llm,
+            OfferTrimmer(enabled=tenant.demo_mode),  # demo line: no stock closing offers (see app/trimmer.py)
             spoke,
             tts,
             transport.output(),
@@ -297,6 +320,7 @@ async def run_call(
     spoke.searched_this_turn = lambda: session.turn_searched
     spoke.on_said = session.note_said
     spoke.writes = lambda: session.writes
+    spoke.abuse = lambda: session.abuse_count if tenant.demo_mode else 0
     stall_watch: asyncio.Task | None = None
 
     async def stall_guard(stopped_at: float) -> None:
@@ -334,10 +358,10 @@ async def run_call(
         if emergency:
             # Spoken by code, not the LLM, so an emergency always gets an immediate human-sounding reply.
             filler = language_module.phrase("emergency", lang)
-        elif names & {"book_appointment", "reschedule_appointment", "cancel_appointment"}:
-            filler = language_module.phrase("book", lang)
+        elif names & {"book_appointment", "reschedule_appointment", "cancel_appointment", "request_boltix_callback"}:
+            filler = session.language_state.filler("book", lang)  # a different line from the last one this call
         elif names & {"check_availability", "find_appointments"}:
-            filler = language_module.phrase("check", lang)
+            filler = session.language_state.filler("check", lang)
         else:
             return
         await service.push_frame(TTSSpeakFrame(filler, append_to_context=False))
@@ -412,7 +436,8 @@ async def _close_call(
 ) -> None:
     """Bill and summarize. Runs after the caller is gone, so it costs no latency."""
     duration = int(time.monotonic() - started)
-    summary = await _summarize(transcript)
+    demo = session.tenant.demo_mode
+    summary = await _summarize(transcript, demo=demo)
     try:
         await call_log_ready  # the row must exist before it can be finalized
         await session.flush()  # background appointment writes
@@ -422,9 +447,33 @@ async def _close_call(
         # Never lose billing silently: the row stays 'in_progress' with
         # billed_minutes null, which a reconciliation job can pick up.
         log.exception("failed to finalize call")
+    if demo:
+        _email_demo_report(call_id, duration, transcript, summary, session, log)
 
 
-async def _summarize(transcript: list[dict]) -> str | None:
+def _email_demo_report(call_id: str, duration: int, transcript: list[dict], summary: str | None, session: CallSession, log) -> None:
+    """Emails Boltix AI what happened on a demo call. Scheduled in the background after the caller is gone; any failure
+    is logged and ignored, so it can never touch billing or the call."""
+    try:
+        cb = session.callback
+        lead = (
+            notify.DemoLeadEmail(
+                name=cb["name"], practice_name=cb["practice_name"], phone=cb["phone"],
+                best_time=cb.get("best_time") or "", notes=cb.get("notes") or "", call_id=call_id,
+            )
+            if cb else None
+        )
+        notify.notify_demo_call(
+            notify.DemoCallEmail(
+                caller_phone=session.caller_phone or "", duration_seconds=duration, summary=summary or "",
+                callback_requested=cb is not None, transcript=transcript, call_id=call_id, lead=lead,
+            )
+        )
+    except Exception:
+        log.exception("could not schedule the demo call report email")
+
+
+async def _summarize(transcript: list[dict], demo: bool = False) -> str | None:
     if not transcript:
         return None
     lines = "\n".join(f"{t['role']}: {t['content']}" for t in transcript)
@@ -432,14 +481,9 @@ async def _summarize(transcript: list[dict]) -> str | None:
         resp = await _openai.chat.completions.create(
             model=config.OPENAI_MODEL,
             temperature=0,
-            max_tokens=120,
+            max_tokens=200 if demo else 120,
             messages=[
-                {
-                    "role": "system",
-                    "content": "Summarize this dental front-desk call in one or two sentences for clinic staff. "
-                    "Include the patient's name, the intent (book/reschedule/cancel/emergency/question), the outcome, "
-                    "and any follow-up needed.",
-                },
+                {"role": "system", "content": _SUMMARY_DEMO if demo else _SUMMARY},
                 {"role": "user", "content": lines[:12000]},
             ],
         )
