@@ -941,3 +941,38 @@ def test_guards_understand_curly_apostrophes():
     assert broke_promise("Thank you, Ahmed! I’ve got you scheduled for Friday at noon.", False) == "unsaved"
     assert broke_promise("I’ll check the calendar.", False) == "promise"
     assert PromiseGuard().check("The three PM slot isn’t available.", False, 0, searched=False) == "unsearched"
+
+
+def test_never_book_a_slot_whose_date_differs_from_the_confirmed_date(session):
+    """Found by conversation_eval (book_switch_day): the caller said "Actually, it's October 21" at a read-back of Saturday,
+    October 24; Mia read back "Saturday, October 21" and booked Wednesday the 21st."""
+    from app.tools import date_conflict, spoken_day
+
+    sat = datetime(2026, 10, 24, 9, tzinfo=TZ)
+    assert not date_conflict("So that's a cleaning on Saturday, October 24 at 9 AM. Is that correct?", sat)
+    assert date_conflict("So that's a cleaning on Saturday, October 21 at 9 AM. Is that correct?", sat)  # wrong date
+    assert date_conflict("So that's a cleaning on Wednesday, October 24 at 9 AM.", sat)  # wrong weekday
+    assert date_conflict("Actually, it's October 21st", sat) and not date_conflict("Yes, that's right", sat)
+    assert not date_conflict("a cleaning tomorrow at nine. Is that correct?", sat)  # names no day: nothing to check
+
+    other = session.tomorrow + timedelta(days=2)  # a different day than the slot that gets booked
+    options = run(session.check_availability(session.tomorrow.date().isoformat(), "any"))["options"]
+    slot_id = options[0]["slot_id"]
+    slot = session.offered_slots[slot_id]
+    session.note_heard("My name is Jane Wilson")
+    session.note_said("Is the number you're calling from the best one to reach you?")
+    args = ("Jane Wilson", "5125550199", "Cleaning", True, False, slot_id)
+
+    # the read-back named another day than the slot
+    session.note_said(f"So that's a cleaning on {spoken_day(other.date())} at nine. Is that correct?")
+    session.note_heard("Yes")
+    assert run(session.book_appointment(*args))["error"] == "date_mismatch" and not session.calcom.bookings
+    # the caller corrected the date in the same breath as agreeing
+    session.note_said(f"So that's a cleaning on {spoken_day(slot.date())} at nine. Is that correct?")
+    session.note_heard(f"Yes, but make it {other:%B} {other.day}")
+    assert run(session.book_appointment(*args))["error"] == "date_mismatch" and not session.calcom.bookings
+    # read back correctly and confirmed: books
+    session.note_said(f"So that's a cleaning on {spoken_day(slot.date())} at nine. Is that correct?")
+    session.note_heard("Yes, that's right")
+    assert run(session.book_appointment(*args))["status"] == "booked"
+    assert session.calcom.bookings[0][0].date() == slot.date()

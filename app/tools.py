@@ -224,6 +224,25 @@ def is_readback(said: str) -> bool:
     return said.strip().endswith("?") and bool(_READBACK.search(said))
 
 
+_MONTH_NAMES = "|".join(_MONTHS)
+_WEEKDAY_NAMES = "monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+_MONTH_DAY = re.compile(rf"\b({_MONTH_NAMES})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", re.I)
+_WEEKDAY = re.compile(rf"\b({_WEEKDAY_NAMES})\b", re.I)
+
+
+def dates_named(text: str) -> tuple[set[tuple[int, int]], set[int]]:
+    """({(month, day)}, {weekday}) that a sentence names: 'Saturday, October 24' -> ({(10, 24)}, {5})."""
+    days = {(_MONTHS[m.group(1).lower()], int(m.group(2))) for m in _MONTH_DAY.finditer(text)}
+    weekdays = {_WEEKDAYS[w.lower()] for w in _WEEKDAY.findall(text)}
+    return days, weekdays
+
+
+def date_conflict(text: str, slot: datetime) -> bool:
+    """True when `text` names a day (a date or a weekday) that is not the slot's."""
+    days, weekdays = dates_named(text)
+    return any(d != (slot.month, slot.day) for d in days) or any(w != slot.weekday() for w in weekdays)
+
+
 def is_affirmative(heard: str) -> bool:
     return bool(_YES.search(heard)) and not _NO.search(heard.strip())
 
@@ -762,6 +781,13 @@ class CallSession:
             return {"error": "phone_not_confirmed", "say": (
                 "You have not asked about their number yet. Ask once: \"Is the number you're calling from the best one to "
                 "reach you?\" (do not read the digits aloud), and book with the number they give or the caller ID.")}
+        if not is_emergency and (date_conflict(self.said[-1], slot) or date_conflict(self.heard[-1], slot)):
+            # The read-back named a different day than the slot being booked, or the caller just corrected the date. Never
+            # book a slot whose date differs from the one the caller confirmed.
+            return {"error": "date_mismatch", "say": (
+                f"The slot you chose is {spoken_time(slot)}, which is not the day the caller was told or just named. Do not book it. "
+                "If the caller wants a different day, call check_availability for that day first and offer its real times; "
+                "otherwise read back exactly this day and time and ask \"Is that correct?\".")}
         phone = normalize_phone(phone_number) or self.caller_phone
         if not phone:
             return {"error": "missing_phone", "say": "Ask for the best contact number."}
