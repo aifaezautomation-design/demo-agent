@@ -62,7 +62,13 @@ Responsiveness comes from several choices:
 - HTTP connections to Cal.com stay warm.
 - End of turn is decided by Smart Turn plus a 200 ms VAD stop, not by a fixed silence wait.
 - Models are baked into the image.
-- LLM output is capped at 200 tokens.
+- LLM output is capped at 150 tokens.
+- One OpenAI connection is shared by every call, and while the greeting plays the call's prompt is sent once
+  (`OPENAI_WARMUP`), so the first reply skips the connection setup and finds the prompt already cached.
+- A stuck OpenAI request is sent again after 3 s (`OPENAI_RETRY_SECS`) instead of leaving the caller in silence.
+- Every reply logs one line with its delay and where the time went, for example
+  `reply latency 1.21s (endpointing wait 0.20s, transcription 0.18s, LLM inference 0.62s, speech synthesis 0.11s)`.
+  Search the Railway logs for `reply latency`.
 
 Expect roughly **0.8–1.2 s caller-perceived response time** over the phone network. Telnyx transit, end-of-turn detection, and LLM time-to-first-token add up past 500 ms even when every component is fast. Measure with `enable_metrics` (already on) before quoting a number to clients. Keep the system prompt short: every token adds to time-to-first-token.
 
@@ -100,6 +106,9 @@ Transcripts and recordings are PHI. You need BAAs with Telnyx, Deepgram, OpenAI,
 | `FLUX_EAGER_EOT_THRESHOLD` / `FLUX_EOT_THRESHOLD` | `0.5` / `0.7` | How sure Flux must be to start the LLM early / to end the turn. More aggressive values made no difference in testing |
 | `FLUX_EOT_TIMEOUT_MS` | `2000` | Longest silence before the turn ends whatever the confidence (Flux's own default is 5000) |
 | `OPENAI_MODEL` / `OPENAI_TEMPERATURE` / `OPENAI_MAX_TOKENS` | `gpt-4o-mini` / `0.3` / `150` | Real replies average about 30 tokens and peak near 65, so the bound only cuts off a runaway answer. Temperature does not change latency |
+| `OPENAI_WARMUP` | `1` | Sends the call's prompt to OpenAI once while the greeting plays (one output token), so the first reply is faster |
+| `OPENAI_RETRY_SECS` | `3` | An OpenAI request that has not started answering after this long is sent again. `0` = off |
+| `OPENAI_SERVICE_TIER` | empty | `priority` = OpenAI's faster, steadier tier at a higher per-token price; try it if `LLM inference` dominates the `reply latency` lines |
 | `MULTILINGUAL_ENABLED` | `0` | `1` turns on language detection and Urdu switching (and uses nova-3, not Flux) |
 | `CARTESIA_VOLUME` | `1.4` | Voice volume, 0.5 to 2.0 (clips above about 1.5) |
 | `CARTESIA_STREAM_TOKENS` | `0` | Token-by-token text to the voice. Measured: it made the first audio *slower* (0.58 s vs 0.33 s), so leave it off |

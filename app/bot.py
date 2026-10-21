@@ -10,9 +10,10 @@ import asyncio
 import time
 import uuid
 
+import httpx
 from fastapi import WebSocket
 from loguru import logger
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -25,6 +26,10 @@ from pipecat.frames.frames import (
     LLMRunFrame,
     LLMTextFrame,
     TTSSpeakFrame,
+)
+from pipecat.observers.user_bot_latency_observer import (
+    MeasuredFrom,
+    UserBotLatencyObserver,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.service_switcher import (
@@ -58,6 +63,7 @@ from pipecat.workers.runner import WorkerRunner
 from app import config, db, notify
 from app import language as language_module
 from app.db import Tenant
+from app.demo_hints import DemoHints
 from app.emergency import EmergencyTriage
 from app.guards import NOTES, PromiseGuard, broke_promise  # noqa: F401  (broke_promise is re-exported for tests)
 from app.language import LanguageDetector
@@ -79,7 +85,53 @@ _SUMMARY_DEMO = (
     "(for example a test booking or a callback request), and any follow-up needed. "
     "If the caller asked for a real person or a callback, say so clearly."
 )
-_openai = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+# One OpenAI client for the whole process, shared by every call's LLM, the warm-up and the summaries. Pipecat would
+# otherwise open a new client per call (and never close it), so each call's first reply paid a fresh TCP and TLS
+# handshake. Idle connections are dropped after two minutes, and the warm-up opens a new one while the greeting plays.
+_openai = AsyncOpenAI(
+    api_key=config.OPENAI_API_KEY,
+    http_client=DefaultAsyncHttpxClient(
+        limits=httpx.Limits(max_keepalive_connections=50, max_connections=500, keepalive_expiry=120)
+    ),
+)
+_background: set[asyncio.Task] = set()  # strong references for fire-and-forget tasks
+
+
+class _SharedClientOpenAILLMService(OpenAILLMService):
+    """OpenAILLMService on the process-wide client above."""
+
+    def create_client(self, *args, **kwargs):
+        return _openai
+
+
+async def _warm_up_llm(llm: OpenAILLMService, context: LLMContext, log) -> None:
+    """Sends the call's prompt and tools to OpenAI once while the greeting plays: the connection is open and the prompt is
+    in OpenAI's cache before the caller's first question, which is the reply a caller judges the line by. One output
+    token; any failure is logged and ignored."""
+    started = time.monotonic()
+    try:
+        params = llm.get_llm_adapter().get_llm_invocation_params(
+            context, convert_developer_to_user=not llm.supports_developer_role
+        )
+        await asyncio.wait_for(
+            _openai.chat.completions.create(
+                model=config.OPENAI_MODEL,
+                max_tokens=1,
+                **({"service_tier": config.OPENAI_SERVICE_TIER} if config.OPENAI_SERVICE_TIER else {}),
+                **params,
+            ),
+            timeout=10,
+        )
+        log.info(f"LLM warm-up done in {(time.monotonic() - started) * 1000:.0f} ms")
+    except Exception as e:
+        log.warning(f"LLM warm-up failed, the call is unaffected: {e!r}")
+
+
+def _log_latency(log, breakdown) -> None:
+    """One line per reply in the server log: how long the caller waited and where the time went."""
+    parts = ", ".join(f"{c.label} {c.duration_secs:.2f}s" for c in breakdown.contributions if c.duration_secs >= 0.01)
+    what = "greeting" if breakdown.measured_from is MeasuredFrom.CLIENT_CONNECTED else "reply"
+    log.info(f"{what} latency {breakdown.total_secs:.2f}s ({parts})")
 
 
 class _SpokeTracker(FrameProcessor):
@@ -182,13 +234,15 @@ def _build_nova_stt(language: str) -> DeepgramSTTService:
 
 def build_services(keyterms: list[str] | None = None) -> tuple[DeepgramSTTService, OpenAILLMService, CartesiaTTSService]:
     stt = build_stt(config.DEEPGRAM_LANGUAGE, keyterms)
-    llm = OpenAILLMService(
-        api_key=config.OPENAI_API_KEY,
+    llm = _SharedClientOpenAILLMService(
         settings=OpenAILLMService.Settings(
             model=config.OPENAI_MODEL,
             temperature=config.OPENAI_TEMPERATURE,
             max_tokens=config.OPENAI_MAX_TOKENS,  # voice turns are short; caps runaway answers
         ),
+        service_tier=config.OPENAI_SERVICE_TIER,
+        retry_on_timeout=config.OPENAI_RETRY_SECS > 0,
+        retry_timeout_secs=config.OPENAI_RETRY_SECS or None,
     )
     tts = CartesiaTTSService(
         api_key=config.CARTESIA_API_KEY,
@@ -284,6 +338,7 @@ async def run_call(
             stt_node,
             *([language_detector] if language_detector else []),
             EmergencyTriage(session, session.language_state),
+            *([DemoHints(session.language_state)] if tenant.demo_mode else []),  # demo line: price and transfer questions
             aggregators.user(),
             llm,
             OfferTrimmer(enabled=tenant.demo_mode),  # demo line: no stock closing offers (see app/trimmer.py)
@@ -293,6 +348,12 @@ async def run_call(
             aggregators.assistant(),
         ]
     )
+    latency = UserBotLatencyObserver()
+
+    @latency.event_handler("on_latency_breakdown")
+    async def on_latency(_observer, breakdown):
+        _log_latency(log, breakdown)
+
     worker = PipelineWorker(
         pipeline,
         params=PipelineParams(
@@ -301,6 +362,7 @@ async def run_call(
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
+        observers=[latency],
         idle_timeout_secs=60,
         enable_rtvi=rtvi,  # only the browser test client speaks RTVI; phone calls skip the extra processor
     )
@@ -364,6 +426,10 @@ async def run_call(
     async def on_connected(_transport, _ws):
         # Spoken straight through TTS: no LLM round trip before the caller hears us.
         await worker.queue_frame(TTSSpeakFrame(greeting))
+        if config.OPENAI_WARMUP:
+            task = asyncio.ensure_future(_warm_up_llm(llm, context, log))
+            _background.add(task)
+            task.add_done_callback(_background.discard)
 
     @transport.event_handler("on_client_disconnected")
     async def on_disconnected(_transport, _ws):

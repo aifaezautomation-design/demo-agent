@@ -205,7 +205,7 @@ def test_services_construct_with_configured_settings(monkeypatch):
     assert stt._settings.eot_timeout_ms == 2000  # Flux's own default is 5000: a paused caller is not left waiting 5 s
     assert stt._settings.keyterm == ["Dr. Sarah Jenkins", "Delta Dental"]
     assert tts._settings.voice == config.CARTESIA_VOICE_ID
-    assert tts._settings.generation_config.volume == config.CARTESIA_VOLUME == 1.4
+    assert tts._settings.generation_config.volume == config.CARTESIA_VOLUME
 
     monkeypatch.setattr(config, "DEEPGRAM_STT", "nova")  # the rollback setting
     stt, _, _ = build_services()

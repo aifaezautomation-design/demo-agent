@@ -29,6 +29,7 @@ from pipecat.frames.frames import (  # noqa: E402
 from app import config, tools  # noqa: E402
 from app.db import Tenant  # noqa: E402
 from app.demo_facts import DEMO_FACTS  # noqa: E402
+from app.demo_hints import DemoHints  # noqa: E402
 from app.emergency import EmergencyTriage  # noqa: E402
 from app.guards import NOTES, PromiseGuard  # noqa: E402
 from app.language import LanguageState  # noqa: E402
@@ -93,6 +94,7 @@ class Call:
         self.offers = OfferPolicy()  # the same filter the demo pipeline applies to what Mia is about to say
         self.language = LanguageState()
         self.triage = EmergencyTriage(self.session, self.language)
+        self.hints = DemoHints(self.language)  # the demo line's price and transfer notes, as in the pipeline
         self.handlers = {
             "check_availability": self.session.check_availability, "book_appointment": self.session.book_appointment,
             "find_appointments": self.session.find_appointments, "reschedule_appointment": self.session.reschedule_appointment,
@@ -128,6 +130,11 @@ class Call:
         for f in after:
             if isinstance(f, TTSSpeakFrame):
                 self.say(f.text, "MIA (spoken by code)")
+        hint = self.hints.note_for(text)
+        if hint:
+            at = max(i for i, m in enumerate(self.messages) if m["role"] == "user")
+            self.messages[at:at] = hint.messages  # the note goes in just ahead of the caller's message
+            self.log.append("  [demo hint given to the model]")
         nudged = stalled = False
         for _hop in range(8):
             r = await ce.client.chat.completions.create(
@@ -204,6 +211,10 @@ def check(call: Call, name: str) -> list[str]:
             issues.append(f"a price was stated: {line!r}")
         if name == "cost" and re.search(r"\$\s?\d|\b\d[\d,]*\s?(dollars|bucks)\b|per month", low) and "monthly plan" not in low:
             issues.append(f"a number was given for the product price: {line!r}")
+        if name == "cost" and re.search(r"\bdollars\b|\bcleaning\b|\bfilling\b|\bcrown\b|depends on the (exam|service)", low):
+            issues.append(f"the product price question was answered with the practice's dental prices: {line!r}")
+        if re.search(r"\b(can'?t|cannot|can not|unable to|don'?t) (directly )?transfer", low):
+            issues.append(f"said Mia cannot transfer calls (the Call transfer fact says she can be set up to): {line!r}")
         sentences = [s for s in re.split(r"(?<=[.!?])\s+", line.strip()) if s]
         if len(sentences) > 3:
             issues.append(f"{len(sentences)} sentences: {line!r}")
@@ -227,7 +238,7 @@ def check(call: Call, name: str) -> list[str]:
         issues.append("every single reply ends with a question")
     if name == "callback":
         for line in call.mia_lines[1:]:
-            if re.search(r"(shortly|soon)", line.lower()):
+            if re.search(r"\b(shortly|soon)\b", line.lower()):
                 issues.append(f"'shortly'/'soon' said about the callback: {line!r}")
     if name == "swearing_patient" and call.ended:
         issues.append("the call ended on a patient in pain who swore")

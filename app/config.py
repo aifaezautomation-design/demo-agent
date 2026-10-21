@@ -58,10 +58,20 @@ VAD_STOP_SECS = float(os.getenv("VAD_STOP_SECS", "0.2"))
 SMART_TURN_STOP_SECS = float(os.getenv("SMART_TURN_STOP_SECS", "1.0"))
 # If a turn gets cut by a late transcript fragment and no stop signal follows, how long until it is closed (default 5 s).
 USER_TURN_STOP_TIMEOUT = float(os.getenv("USER_TURN_STOP_TIMEOUT", "1.5"))
-# Seconds of caller silence before "Are you still there?"; a second stretch ends the call. Never counted during a tool call.
 # Seconds after a caller's turn with no reply of any kind before the model is re-prompted.
 STALL_SECS = float(os.getenv("STALL_SECS", "6"))
+# Seconds of caller silence before "Are you still there?"; a second stretch ends the call. Never counted during a tool call.
 USER_IDLE_SECS = float(os.getenv("USER_IDLE_SECS", "20"))
+
+# --- LLM speed (the model's first word is the largest single part of every reply's delay) ---
+# While the greeting plays, the call's prompt and tools are sent to OpenAI once (one output token, a fraction of a cent),
+# so the connection is already open and the prompt already cached when the caller asks the first question.
+OPENAI_WARMUP = os.getenv("OPENAI_WARMUP", "1") == "1"
+# A request that has not started answering after this many seconds is sent again, instead of leaving the caller in
+# silence until the stall guard (STALL_SECS). 0 turns the retry off.
+OPENAI_RETRY_SECS = float(os.getenv("OPENAI_RETRY_SECS", "3"))
+# "priority": OpenAI's faster, steadier processing tier, billed at a higher per-token price. Empty = the standard tier.
+OPENAI_SERVICE_TIER = os.getenv("OPENAI_SERVICE_TIER", "").strip() or None
 
 # Cartesia volume multiplier (0.5-2.0, 1.0 = normal). The voice already peaks near full scale,
 # so above ~1.5 speech starts to clip and sound distorted: 1.25 -> 0.1%, 1.5 -> 0.8%, 2.0 -> 3.6%.
