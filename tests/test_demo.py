@@ -312,3 +312,94 @@ def test_the_readback_wording_is_recognised_and_does_not_sound_booked():
     assert "So that's a routine cleaning" in prompt and "Do not mention texts or emails unless the caller asks" in prompt
     assert "How can I assist you today?" in prompt  # listed as a phrase never to say
     assert "asking how I'd handle it" in build_system_prompt(demo_tenant(), "+15125550199")
+
+
+def test_demo_greeting_is_short_and_production_keeps_its_own():
+    from app.bot import _greeting
+
+    demo = _greeting(demo_tenant())
+    assert demo == "Thanks for calling Apex Dental Care, this is Mia, an AI receptionist. Talk to me like a patient, or ask how I work."
+    assert len(demo.split()) < 25
+    assert _greeting(make_tenant(demo_mode=False, name="Apex Dental Care")) == "Thanks for calling Apex Dental Care, this is Mia. How can I help you today?"
+    assert "This call may be recorded." in _greeting(make_tenant(demo_mode=True, record_calls=True, name="Apex Dental Care"))
+
+
+@pytest.mark.parametrize("line", ["fuck you robot", "F*** you, you useless bot", "you fucking machine", "You are a fucking idiot", "fuck off"])
+def test_swearing_aimed_at_mia_counts(line):
+    from app.tools import is_abusive
+
+    assert is_abusive(line), line
+
+
+@pytest.mark.parametrize("line", [
+    "this is fucking cool", "my fucking tooth hurts", "the pain is fucking unbearable", "I'm so fucking tired of this toothache",
+    "you're fucking amazing", "what the fuck is wrong with my gum", "thanks, you fucking rock",
+])
+def test_swearing_about_pain_teeth_or_praise_never_counts(line):
+    from app.tools import is_abusive
+
+    assert not is_abusive(line), line
+    s = CallSession(demo_tenant(), "cx", "+15125550199")
+    s.note_heard(line)
+    assert s.abuse_strikes == 0
+
+
+def test_a_swearing_patient_in_pain_is_never_hung_up_on():
+    s = CallSession(demo_tenant(), "cy", "+15125550199")
+    for line in ["my fucking tooth hurts", "this fucking pain is a 10 out of 10", "fuck you robot"]:
+        s.note_heard(line)
+    assert s.emergency_seen and s.abuse_count == 0  # the emergency report came first: strikes stop
+
+
+@pytest.mark.parametrize("line", ["Please stop emailing us", "remove me from your list", "We're not interested", "not interested.", "unsubscribe",
+                                  "don't contact us again"])
+def test_opt_out_is_recorded_on_the_demo_line_only(line):
+    from app.tools import is_opt_out
+
+    assert is_opt_out(line)
+    demo = CallSession(demo_tenant(), "cz", "+15125550199")
+    demo.note_heard(line)
+    assert demo.opt_out
+    prod = CallSession(make_tenant(demo_mode=False), "cp", "+15125550199")
+    prod.note_heard(line)
+    assert not prod.opt_out
+
+
+def test_opt_out_needs_a_request_to_stop_not_a_word():
+    from app.tools import is_opt_out
+
+    for fine in ["I'm not interested in whitening, just a cleaning", "How do I get started?", "Can you stop by the office?"]:
+        assert not is_opt_out(fine), fine
+
+
+def test_opt_out_puts_opt_out_first_in_the_report_subject():
+    from app import notify
+
+    base = dict(caller_phone="+15125550199", duration_seconds=30, summary="Asked to stop.", callback_requested=False,
+                transcript=[{"role": "patient", "content": "Please stop emailing us"}])
+    subject, html, text = notify.render_demo_call(notify.DemoCallEmail(**base, opt_out=True))
+    assert subject.startswith("OPT-OUT:") and "YES (opt-out)" in text
+    assert not notify.render_demo_call(notify.DemoCallEmail(**base))[0].startswith("OPT-OUT")
+
+
+def test_founder_and_outreach_facts_are_in_the_demo_prompt():
+    section = _demo_rules(demo_tenant())
+    for key in ("founder", "faez_email", "outreach", "opt_out", "info_by_email"):
+        assert DEMO_FACTS[key] in section, key
+    assert "at most TWO highlights" in section and "wants info by email" in section
+    assert DEMO_FACTS["founder"] == "Faez, the founder of Boltix AI"
+    assert DEMO_FACTS["faez_email"] == "Yes, Faez from Boltix AI set this demo up so you can hear me."
+    assert DEMO_FACTS["outreach"] == "That was Faez from Boltix AI. He can go through it with you on a short call."
+    assert "Faez" not in build_system_prompt(make_tenant(demo_mode=False), "+15125550199")
+
+
+@pytest.mark.parametrize("text,kind", [
+    ("How much does this cost?", "price"), ("Can you transfer me to a person?", "transfer"), ("I got an email from Faez", "faez"),
+    ("Who is Faez?", "faez"), ("Did someone call our office today?", "outreach"), ("How did you get my email?", "outreach"),
+    ("Please stop emailing us", "opt_out"), ("What can you do?", "capabilities"), ("Can you send me more info by email?", "info_email"),
+    ("Are you recording this?", None), ("Hello? Hello? Can you hear me?", None), ("How much is a cleaning?", None),
+])
+def test_demo_hints_route_the_new_questions(text, kind):
+    from app.demo_hints import hint_for
+
+    assert hint_for(text) == kind

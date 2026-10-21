@@ -18,6 +18,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from app.demo_facts import DEMO_FACTS
+from app.tools import is_opt_out
 
 _PRICE = re.compile(r"\b(how much|cost|costs|costing|price|prices|pricing|priced|charge|charges|fee|fees|expensive|cheap|afford)\b", re.I)
 # Words that point at Mia or the service rather than at a dental treatment.
@@ -41,20 +42,70 @@ _TRANSFER = re.compile(
     re.I,
 )
 
+_FAEZ = re.compile(r"\bfaez\b|\b(email|e-mail|message) from (boltix|boltics|bolt ?x)\b|\bgot (an|your) (email|e-mail)\b", re.I)
+_OUTREACH = re.compile(
+    r"\b(did|has|have) (someone|somebody|anyone|you|boltix|faez)\b[^.?!]*\b(call|called|calling|contact|contacted|reach|reached)\b|"
+    r"\bhow did you (get|find) (my|our|the) (e-?mail|number|name|info|information|address)\b|\bwhy (are you|did you) (calling|call|email)\w*\b",
+    re.I,
+)
+_INFO_EMAIL = re.compile(
+    r"\b(send|email|e-mail|mail)\b[^.?!]*\b(more )?(info|information|details|brochure|pricing|something)\b[^.?!]*\b(by )?(e-?mail)?\b|"
+    r"\bmore (info|information|details)\b[^.?!]*\be-?mail\b",
+    re.I,
+)
+_CAPABILITIES = re.compile(r"\bwhat (can|do) you (do|offer|handle)\b|\bwhat (are you|is this) (able|capable)\b|\bwhat does (this|it|mia) do\b", re.I)
+
+OPT_OUT_NOTE = (
+    "SYSTEM NOTE: the caller is asking not to be contacted again. Say exactly one polite line, for example "
+    f'"{DEMO_FACTS["opt_out"]}" Nothing else: no question, no offer, no next step. Then stop.'
+)
+FAEZ_NOTE = (
+    "SYSTEM NOTE: the caller mentions an email, or Faez. Faez is " + DEMO_FACTS["founder"] + '. If they say they got an email '
+    f'from Faez or Boltix AI, answer: "{DEMO_FACTS["faez_email"]}" If they ask who Faez is, say he is the founder of Boltix AI. '
+    "Say nothing else about Faez; never invent his background, title history, location, or plans."
+)
+OUTREACH_NOTE = (
+    f'SYSTEM NOTE: the caller asks if someone called their office or how you got their email. Answer: "{DEMO_FACTS["outreach"]}" '
+    "Do not argue, guess, or explain how contact details were found."
+)
+INFO_EMAIL_NOTE = (
+    f'SYSTEM NOTE: the caller wants more information by email. Say exactly: "{DEMO_FACTS["info_by_email"]}" Nothing more. '
+    "You have no email address for them, so never promise to send, or have the team send, an email or any information. "
+    'Only if they choose the call, use the request_boltix_callback flow (name, practice, number, read-back, yes) and put '
+    '"wants info by email" in notes.'
+)
+CAPABILITIES_NOTE = (
+    "SYSTEM NOTE: the caller asks what you can do. Name at most TWO highlights from the What you do fact (for example answering "
+    "every call day or night, and booking appointments) in one or two short sentences, then stop. Never read the whole list."
+)
+
 PRICE_NOTE = (
     "SYSTEM NOTE: if the caller's next message asks what you or the service cost (not the price of a dental "
-    f"treatment), answer only with the Price of Mia fact: {DEMO_FACTS['pricing']}. Say no number and no dental prices. "
-    'Then offer: "Want me to have the team call you with a quote?"'
+    f"treatment), answer only from the Price of Mia fact: {DEMO_FACTS['pricing']}. Say no number and no dental prices. "
+    'Use this short wording: "It\'s a monthly plan based on call minutes, plus a one-time setup fee, and the Boltix AI team '
+    'gives an exact quote." Then offer: "Want me to have the team call you with a quote?"'
 )
 TRANSFER_NOTE = (
     "SYSTEM NOTE: the caller's next message is about transferring a call. Answer from the Call transfer fact: "
-    f"{DEMO_FACTS['call_transfer']}. Never say you can't transfer calls. Offer to have the team call them back."
+    f"{DEMO_FACTS['call_transfer']}. Never say you can't transfer calls. Use this wording: \"For a practice, "
+    "I can be set up to transfer calls to the front desk. In this demo there's no one to transfer to, but I can have the "
+    'team call you back."'
 )
 
 
 def hint_for(text: str) -> str | None:
     """'price', 'transfer', or None for what the caller just said."""
     t = " ".join((text or "").split())
+    if is_opt_out(t):
+        return "opt_out"
+    if _OUTREACH.search(t):
+        return "outreach"
+    if _FAEZ.search(t):
+        return "faez"
+    if _INFO_EMAIL.search(t) and not _PRICE.search(t):
+        return "info_email"
+    if _CAPABILITIES.search(t):
+        return "capabilities"
     if _TRANSFER.search(t):
         return "transfer"
     if _PRICE.search(t) and _PRODUCT.search(t) and not _DENTAL.search(t):
@@ -62,7 +113,10 @@ def hint_for(text: str) -> str | None:
     return None
 
 
-NOTES = {"price": PRICE_NOTE, "transfer": TRANSFER_NOTE}
+NOTES = {
+    "price": PRICE_NOTE, "transfer": TRANSFER_NOTE, "opt_out": OPT_OUT_NOTE, "faez": FAEZ_NOTE, "outreach": OUTREACH_NOTE,
+    "info_email": INFO_EMAIL_NOTE, "capabilities": CAPABILITIES_NOTE,
+}
 
 
 class DemoHints(FrameProcessor):

@@ -1040,3 +1040,56 @@ def test_the_word_confirmations_is_not_a_readback():
     g.check(line, False, 0)
     assert g.check("The setup usually takes just a few days.", False, 0) is None
     assert is_readback("So that's a cleaning on Friday at nine. Is that correct?") and is_readback("Just to confirm, nine AM Friday?")
+
+
+CAL_TODAY = date(2026, 10, 21)  # a Wednesday: Friday is the 23rd, Monday the 26th
+
+
+def test_weekday_and_date_are_checked_in_code_not_by_the_model():
+    """Found by conversation_eval: Mia told a caller that Friday, October 23 is a Sunday."""
+    from app.tools import date_claim, date_note, resolve_day
+
+    ok = date_claim("Friday the 23rd", CAL_TODAY)
+    assert ok["by_number"] == date(2026, 10, 23) and ok["weekday"] == 4 and not ok["mismatch"]
+    assert "Friday, October 23. That is correct" in date_note("I'd like Friday the 23rd please", CAL_TODAY)
+
+    bad = date_claim("Monday the 23rd", CAL_TODAY)  # the 23rd is a Friday
+    assert bad["mismatch"] and bad["by_number"] == date(2026, 10, 23) and bad["by_weekday"] == date(2026, 10, 26)
+    note = date_note("Monday the 23rd", CAL_TODAY)
+    assert "Friday, October 23" in note and "Monday, October 26" in note and "ask which they mean" in note.lower()
+
+    assert "Friday, October 23" in date_note("how about the 23rd", CAL_TODAY) and not date_claim("the 23rd", CAL_TODAY)["mismatch"]
+    nxt = date_note("next Friday works", CAL_TODAY)
+    assert '"this Friday" is Friday, October 23' in nxt and "Friday, October 30" in nxt
+    assert date_note("Friday at 2 PM", CAL_TODAY) is None and date_note("We have 3 people", CAL_TODAY) is None
+
+    # resolve_day no longer drops the number when a weekday is also said
+    assert resolve_day("friday the 30th", CAL_TODAY) == (date(2026, 10, 30), True)
+    assert resolve_day("friday the 23rd", CAL_TODAY) == (date(2026, 10, 23), True)
+    assert resolve_day("friday", CAL_TODAY) == (date(2026, 10, 23), True)
+    assert resolve_day("next friday", CAL_TODAY) == (date(2026, 10, 30), True)
+    assert resolve_day("the 23rd", CAL_TODAY) == (date(2026, 10, 23), True)
+
+
+def test_a_weekday_date_mismatch_is_answered_by_the_tool_with_the_real_weekday(session):
+    today = datetime.now(TZ).date()
+    target = today + timedelta(days=10)
+    wrong_name = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][(target.weekday() + 1) % 7]
+    result = run(session.check_availability(f"{wrong_name} the {target.day}", "any"))  # e.g. "Monday the 23rd" when it is a Friday
+    assert result["error"] == "weekday_date_mismatch"
+    assert result["date_by_number"] == f"{target:%A, %B} {target.day}"  # the real weekday of that date
+    assert wrong_name in result["date_by_weekday"] and "which they mean" in result["say"]
+    assert not session.calcom.bookings
+    # a matching weekday and date is simply searched
+    right = run(session.check_availability(f"{target:%A} the {target.day}", "any"))
+    assert "error" not in right
+
+
+def test_the_date_check_note_reaches_the_model_before_the_callers_words(session):
+    from app.date_check import DateCheck
+
+    check = DateCheck(session)
+    frame = check.note_for("Can I come next Friday?")
+    assert frame is not None and frame.messages[0]["role"] == "developer" and "SYSTEM NOTE (calendar, exact)" in frame.messages[0]["content"]
+    assert check.note_for("And next Friday again?") is None  # the same note is not repeated
+    assert DateCheck(session).note_for("hello there") is None

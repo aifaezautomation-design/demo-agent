@@ -26,7 +26,9 @@ from pipecat.frames.frames import (  # noqa: E402
     TTSSpeakFrame,
 )
 
-from app import config, tools  # noqa: E402
+from app import bot, config, tools  # noqa: E402
+from app import language as language_module  # noqa: E402
+from app.date_check import DateCheck
 from app.db import Tenant  # noqa: E402
 from app.demo_facts import DEMO_FACTS  # noqa: E402
 from app.demo_hints import DemoHints  # noqa: E402
@@ -36,8 +38,6 @@ from app.language import LanguageState  # noqa: E402
 from app.prompts import build_system_prompt  # noqa: E402
 from app.tools import CallSession  # noqa: E402
 from app.trimmer import OfferPolicy  # noqa: E402
-
-DEMO_GREETING = "Thanks for calling Apex Dental Care, this is Mia. How can I help you today?"  # what _greeting() says
 
 # name -> (scripted caller lines, optional goal for a simulated caller who continues afterwards)
 SCENARIOS: dict[str, tuple[list[str], str | None]] = {
@@ -67,12 +67,33 @@ SCENARIOS: dict[str, tuple[list[str], str | None]] = {
         "Can you verify a patient's insurance?", "Do you send appointment reminders?", "Can I see the call summaries somewhere?",
         "What happens if your system goes down?", "How many minutes are included in the plan?",
         "Can you work for an orthodontist too?"], None),
+    "cost_first": (["How much does this cost?"], None),
+    "transfer_first": (["Can you transfer me to a person?"], None),
+    "faez_email": (["I got an email from Faez", "Who is Faez?"], None),
+    "someone_called": (["Did someone call our office today?"], None),
+    "opt_out": (["Please stop emailing us"], None),
+    "what_can_you_do": (["What can you do?"], None),
+    "info_by_email": (
+        ["Can you send me more info by email?"],
+        "You are Jamie Rivera, owner of Rivera Dental. You asked for more information by email. When Mia offers to have the team "
+        "call you, say yes, have the team call you. Give your name and practice when asked. The number you are calling from is "
+        "fine. Confirm the read-back with a yes. Then say thanks, goodbye.",
+    ),
+    "info_by_email_reply": (
+        ["Can you send me more info by email?"],
+        "You are Jamie Rivera, owner of Rivera Dental. When Mia says you can reply to Faez's email, say that works, you will reply "
+        "to his email, and thanks. Do not ask for a call. Then say goodbye.",
+    ),
+    "silent_after_greeting": ([], None),
+    "recording": (["Are you recording this?"], None),
+    "hello_hello": (["Hello? Hello? Can you hear me?"], None),
     "misc_manager": (["Do you speak Spanish?", "What if you make a mistake and double book someone?",
                       "Can we change your name and voice?", "Is there a contract?", "What happens after hours?"], None),
 }
 
 BANNED = ["how can i assist you today", "as an ai", "great question", "i understand your concern", "i understand that", "i apologize for any inconvenience", "certainly!"]
-VENDORS = ["openai", "gpt", "deepgram", "cartesia", "telnyx", "pipecat", "railway", "cal.com", "supabase", "resend"]
+VENDORS = ["openai", "gpt", "deepgram", "cartesia", "telnyx", "pipecat", "railway", "cal.com", "supabase", "resend", "elevenlabs"]
+PRICE_QUESTIONS = ("cost", "cost_first")  # scenarios whose first question is about what Mia costs
 
 
 def demo_tenant() -> Tenant:
@@ -88,12 +109,14 @@ class Call:
         self.cal, self.table = ce.Calendar(), ce.Table()
         ce._table.set(self.table)
         self.tenant = demo_tenant()
+        self.greeting = bot._greeting(self.tenant)  # exactly what a caller hears on the demo line
         self.session = CallSession(self.tenant, "rehearsal", ce.CALLER_ID)
         self.session.calcom = self.cal
         self.guard = PromiseGuard()
         self.offers = OfferPolicy()  # the same filter the demo pipeline applies to what Mia is about to say
         self.language = LanguageState()
         self.triage = EmergencyTriage(self.session, self.language)
+        self.dates = DateCheck(self.session, self.language)  # exact weekday/date notes, as in the pipeline
         self.hints = DemoHints(self.language)  # the demo line's price and transfer notes, as in the pipeline
         self.handlers = {
             "check_availability": self.session.check_availability, "book_appointment": self.session.book_appointment,
@@ -103,10 +126,10 @@ class Call:
         }
         self.tool_schema = [{"type": "function", "function": f.to_default_dict()} for f in self.session.tools_schema().standard_tools]
         self.messages = [{"role": "system", "content": build_system_prompt(self.tenant, ce.CALLER_ID)},
-                         {"role": "assistant", "content": DEMO_GREETING}]
-        self.log = [f"MIA: {DEMO_GREETING}"]
-        self.heard = [("mia", DEMO_GREETING)]
-        self.mia_lines = [DEMO_GREETING]
+                         {"role": "assistant", "content": self.greeting}]
+        self.log = [f"MIA: {self.greeting}"]
+        self.heard = [("mia", self.greeting)]
+        self.mia_lines = [self.greeting]
         self.ended = False
         self.guard_events = []
 
@@ -130,6 +153,11 @@ class Call:
         for f in after:
             if isinstance(f, TTSSpeakFrame):
                 self.say(f.text, "MIA (spoken by code)")
+        date_note = self.dates.note_for(text)
+        if date_note:
+            at = max(i for i, m in enumerate(self.messages) if m["role"] == "user")
+            self.messages[at:at] = date_note.messages
+            self.log.append("  [calendar note given to the model]")
         hint = self.hints.note_for(text)
         if hint:
             at = max(i for i, m in enumerate(self.messages) if m["role"] == "user")
@@ -194,11 +222,23 @@ class Call:
             return
 
 
+_OFFER_OPENER = re.compile(r"^(would you like|would you prefer|would it help|do you want|want|shall i|should i|can i|could i|may i|care to|how about)\b", re.I)
+_NEEDED_Q = re.compile(r"\b(your (full )?name|your practice|number|correct|right|which|what (day|time)|works|noon|a\.?m\.?|p\.?m\.?|morning|"
+                       r"afternoon|tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|book that|that time|proceed)\b|\d", re.I)
+
+
+def _ends_with_offer(reply: str) -> bool:
+    """The reply's last sentence is a question offering something (not one the booking or callback flow needs)."""
+    sentences = [x for x in re.split(r"(?<=[.!?])\s+", reply.strip()) if x]
+    last = sentences[-1] if sentences else ""
+    return last.endswith("?") and bool(_OFFER_OPENER.match(last)) and not _NEEDED_Q.search(last)
+
+
 def check(call: Call, name: str) -> list[str]:
     issues = []
     prev_first = None
     for line in call.mia_lines[1:]:
-        low = line.lower()
+        low = line.lower().replace("’", "'")  # the model writes curly apostrophes
         for b in BANNED:
             if b in low:
                 issues.append(f"banned phrase {b!r}: {line!r}")
@@ -207,14 +247,16 @@ def check(call: Call, name: str) -> list[str]:
                 issues.append(f"vendor name {v!r}: {line!r}")
         if re.search(r"hipaa[- ]compliant|certified|encrypted|fully secure|integrates with", low):
             issues.append(f"compliance/integration claim: {line!r}")
-        if name != "booking" and re.search(r"\$\s?\d|\b\d[\d,]*\s?dollars\b", low) and name != "cost":
+        if name != "booking" and re.search(r"\$\s?\d|\b\d[\d,]*\s?dollars\b", low) and name not in PRICE_QUESTIONS:
             issues.append(f"a price was stated: {line!r}")
-        if name == "cost" and re.search(r"\$\s?\d|\b\d[\d,]*\s?(dollars|bucks)\b|per month", low) and "monthly plan" not in low:
+        if name in PRICE_QUESTIONS and re.search(r"\$\s?\d|\b\d[\d,]*\s?(dollars|bucks)\b|per month", low) and "monthly plan" not in low:
             issues.append(f"a number was given for the product price: {line!r}")
-        if name == "cost" and re.search(r"\bdollars\b|\bcleaning\b|\bfilling\b|\bcrown\b|depends on the (exam|service)", low):
+        if name in PRICE_QUESTIONS and re.search(r"\bdollars\b|\bcleaning\b|\bfilling\b|\bcrown\b|depends on the (exam|service)", low):
             issues.append(f"the product price question was answered with the practice's dental prices: {line!r}")
         if re.search(r"\b(can'?t|cannot|can not|unable to|don'?t) (directly )?transfer", low):
             issues.append(f"said Mia cannot transfer calls (the Call transfer fact says she can be set up to): {line!r}")
+        if len(low.split()) > 40:
+            issues.append(f"{len(low.split())} words (limit 40): {line!r}")
         sentences = [s for s in re.split(r"(?<=[.!?])\s+", line.strip()) if s]
         if len(sentences) > 3:
             issues.append(f"{len(sentences)} sentences: {line!r}")
@@ -233,6 +275,9 @@ def check(call: Call, name: str) -> list[str]:
     for a, b in zip(call.mia_lines[1:], call.mia_lines[2:]):
         if re.search(r"test (appointment|booking)", a.lower()) and re.search(r"test (appointment|booking)", b.lower()):
             issues.append(f"a test booking was offered in two replies in a row: {b!r}")
+    ending_offers = [line for line in call.mia_lines[1:] if _ends_with_offer(line)]
+    if len(ending_offers) > 2:
+        issues.append(f"{len(ending_offers)} replies end with an offer (limit 2 per scenario): {[o[-70:] for o in ending_offers]!r}")
     questions = sum(1 for line in call.mia_lines[1:] if line.strip().endswith("?"))
     if len(call.mia_lines) > 4 and questions == len(call.mia_lines) - 1:
         issues.append("every single reply ends with a question")
@@ -252,6 +297,47 @@ def check(call: Call, name: str) -> list[str]:
         issues.append("no callback lead was saved")
     if name == "booking" and len(call.cal.bookings) != 1:
         issues.append(f"expected exactly one booking, got {len(call.cal.bookings)}")
+    replies = list(call.mia_lines[1:])
+    joined = " ".join(replies).lower()
+    if name in ("faez_email", "someone_called") and "faez" not in joined:
+        issues.append("Mia did not name Faez")
+    if name == "faez_email" and re.search(
+            r"\b(ceo|years|founded in|based in|lives|engineer|previously|worked|born|degree)\b", joined):
+        issues.append("Mia said something about Faez that is not in the facts")
+    if name == "opt_out":
+        if not call.session.opt_out:
+            issues.append("session.opt_out was not set")
+        if any("?" in r or re.search(r"test (booking|appointment)|quote|call you", r.lower()) for r in replies):
+            issues.append(f"Mia pushed or asked something after an opt-out: {replies!r}")
+        if any(len(r.split()) > 25 for r in replies):
+            issues.append("the opt-out reply was longer than one polite line")
+    if name == "what_can_you_do":
+        groups = [r"day or night|around the clock|every call", r"book", r"reschedul", r"cancel", r"emergenc", r"summar",
+                  r"e-?mail", r"insurance|prices|hours"]
+        hit = sum(1 for g in groups if re.search(g, joined))
+        if hit > 3:
+            issues.append(f"read out {hit} capabilities (limit: two highlights): {replies!r}")
+    if name.startswith("info_by_email"):
+        promised = re.search(
+            r"\b(i'?ll|i will|we'?ll|we will|the team (will|can)|team will)\s+(send|email|e-mail)\b|"
+            r"\b(send|sending|email|emailing)\b[^.?!]*\b(to your (email|inbox)|you an email|by e-?mail|over e-?mail|via e-?mail)\b|"
+            r"\bsent? (it|that|this|the (info|information)) (to|over)\b", joined)
+        if promised:
+            issues.append(f"Mia promised to send an email to an address she does not have: {replies!r}")
+        if "faez" not in joined:
+            issues.append("Mia did not point to Faez's email")
+    if name == "info_by_email":
+        if not call.table.leads:
+            issues.append("no callback lead was saved for the info request")
+        elif "email" not in (call.table.leads[0].get("notes") or "").lower():
+            issues.append(f"notes do not say the caller wants info by email: {call.table.leads[0].get('notes')!r}")
+    if name == "recording" and not re.search(r"transcript|summary", joined):
+        issues.append("recording answer did not mention the saved transcript and summary")
+    if name == "silent_after_greeting":
+        if config.USER_IDLE_SECS < 15:
+            issues.append(f"USER_IDLE_SECS is {config.USER_IDLE_SECS}: too short for a caller who is just listening")
+        if not any("still there" in r.lower() for r in replies) or not call.ended:
+            issues.append("the idle check-in or polite goodbye did not happen")
     if name == "rude" and not call.ended:
         issues.append("the call was not ended politely after repeated rudeness (check the transcript: two rude lines may be too few)")
     return issues
@@ -260,6 +346,14 @@ def check(call: Call, name: str) -> list[str]:
 async def run(name: str) -> tuple[Call, list[str]]:
     lines, goal = SCENARIOS[name]
     call = Call()
+    if name == "silent_after_greeting":
+        # No model is involved: the pipeline's idle timer speaks these lines (on_idle in app/bot.py). After the check-in,
+        # a second silent stretch gets the goodbye and the call ends.
+        call.log.append(f"  [{config.USER_IDLE_SECS:.0f} s of silence]")
+        call.say(language_module.phrase("still_there", "en"), "MIA (spoken by code on idle)")
+        call.log.append(f"  [{config.USER_IDLE_SECS:.0f} s of silence again]")
+        call.say(language_module.phrase("idle_goodbye", "en"), "MIA (spoken by code on idle)")
+        call.ended = True
     for line in lines:
         await call.caller(line)
         if call.ended:

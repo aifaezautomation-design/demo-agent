@@ -62,6 +62,7 @@ from pipecat.workers.runner import WorkerRunner
 
 from app import config, db, notify
 from app import language as language_module
+from app.date_check import DateCheck
 from app.db import Tenant
 from app.demo_hints import DemoHints
 from app.emergency import EmergencyTriage
@@ -183,6 +184,8 @@ def _turn_strategies() -> UserTurnStrategies | None:
 
 def _greeting(tenant: Tenant) -> str:
     disclosure = " This call may be recorded." if tenant.record_calls else ""
+    if tenant.demo_mode:
+        return f"Thanks for calling {tenant.name}, this is Mia, an AI receptionist.{disclosure} Talk to me like a patient, or ask how I work."
     return f"Thanks for calling {tenant.name}, this is Mia.{disclosure} How can I help you today?"
 
 
@@ -338,6 +341,7 @@ async def run_call(
             stt_node,
             *([language_detector] if language_detector else []),
             EmergencyTriage(session, session.language_state),
+            DateCheck(session, session.language_state),  # exact weekday/date for what the caller names (app/date_check.py)
             *([DemoHints(session.language_state)] if tenant.demo_mode else []),  # demo line: price and transfer questions
             aggregators.user(),
             llm,
@@ -527,6 +531,7 @@ def _email_demo_report(call_id: str, duration: int, transcript: list[dict], summ
             notify.DemoCallEmail(
                 caller_phone=session.caller_phone or "", duration_seconds=duration, summary=summary or "",
                 callback_requested=cb is not None, transcript=transcript, call_id=call_id, lead=lead,
+                opt_out=session.opt_out,
             )
         )
     except Exception:

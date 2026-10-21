@@ -13,10 +13,10 @@ DEMO_FACTS: dict[str, str] = {
     "company": "Boltix AI",
     "website": "boltix A I dot com",
     "what_mia_does": (
-        "answers every call day or night with no hold time; answers questions about hours, services, prices, "
-        "insurance and location from the practice's own information; books, reschedules and cancels appointments "
-        "in the calendar; handles dental emergencies by finding the soonest opening and marking urgent callbacks; "
-        "emails the practice the patient's details after every booking; and every call is saved with a short "
+        "I answer every call day or night with no hold time; I answer questions about hours, services, prices, "
+        "insurance and location from the practice's own information; I book, reschedule and cancel appointments "
+        "in the calendar; I handle dental emergencies by finding the soonest opening and marking urgent callbacks; "
+        "I email the practice the patient's details after every booking; and every call is saved with a short "
         "summary for the staff"
     ),
     "pricing": (
@@ -24,7 +24,7 @@ DEMO_FACTS: dict[str, str] = {
         "the Boltix AI team gives an exact quote on a short call"
     ),
     "setup": (
-        "the practice keeps its existing number and forwards calls to Mia; the team sets her up with the "
+        "the practice keeps its existing number and forwards calls to me; the team sets me up with the "
         "practice's hours, services, prices, insurance and calendar"
     ),
     "setup_time": "usually within a few days; the Boltix AI team confirms the timing for a practice on a call",
@@ -33,14 +33,14 @@ DEMO_FACTS: dict[str, str] = {
         "and the practice gets an email with the patient's details after every booking"
     ),
     "call_transfer": (
-        "yes: for a practice, Mia can be set up to transfer calls to the front desk; in this demo there is no one "
+        "yes: for a practice, I can be set up to transfer calls to the front desk; in this demo there is no one "
         "to transfer to"
     ),
     "languages": "this demo speaks English; other languages can be discussed on a call",
     "trial_contract": "the Boltix AI team covers any free trial, contract length and cancellation on a call",
-    "customization": "yes: a practice can choose Mia's name, voice and greeting",
+    "customization": "yes: a practice can choose my name, voice and greeting",
     "practice_software": (
-        "today Mia books into an online calendar; the team checks on a call whether she can connect to the "
+        "today I book into an online calendar; the team checks on a call whether I can connect to the "
         "practice's software"
     ),
     "privacy": "the team walks you through how patient data is handled on a call",
@@ -49,7 +49,7 @@ DEMO_FACTS: dict[str, str] = {
         "have the Boltix AI team call you back"
     ),
     "insurance_verification": (
-        "Mia tells callers which insurance the practice accepts; checking a patient's exact coverage is something the "
+        "I tell callers which insurance the practice accepts; checking a patient's exact coverage is something the "
         "Boltix AI team can go through on a call"
     ),
     "reminders": "the team can talk about that on a call",
@@ -58,7 +58,12 @@ DEMO_FACTS: dict[str, str] = {
     ),
     "outages": "the Boltix AI team can walk you through how reliability is handled on a call",
     "specialties": (
-        "Mia is built for dental practices; the Boltix AI team can talk about orthodontists or other specialties on a call"
+        "I'm built for dental practices; the Boltix AI team can talk about orthodontists or other specialties on a call"
     ),
     "clients": "the Boltix AI team can walk you through that on a call",
+    "founder": "Faez, the founder of Boltix AI",
+    "faez_email": "Yes, Faez from Boltix AI set this demo up so you can hear me.",
+    "outreach": "That was Faez from Boltix AI. He can go through it with you on a short call.",
+    "opt_out": "No problem, I'll let the team know, and sorry for the bother.",
+    "info_by_email": "The easiest way is to reply to Faez's email, and he'll send it right over. Or I can have the team call you.",
 }

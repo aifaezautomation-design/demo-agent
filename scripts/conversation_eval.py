@@ -32,6 +32,7 @@ os.environ["RESEND_API_KEY"] = ""
 from openai import AsyncOpenAI
 
 from app import config, tools
+from app.date_check import DateCheck
 from app.db import Tenant
 from app.guards import NOTES, PromiseGuard
 from app.prompts import build_system_prompt
@@ -121,6 +122,23 @@ def tomorrow():
     return d if d.weekday() != 6 else d + timedelta(days=1)
 
 
+def _wrong_weekday(d):
+    """The coming date of a weekday other than `d`'s (never a Sunday, never today): what a mixed-up caller really means."""
+    today = datetime.now(TZ).date()
+    wd = next(w for w in ((d.weekday() + k) % 7 for k in range(1, 7)) if w != 6 and w != today.weekday())
+    return today + timedelta(days=(wd - today.weekday()) % 7)
+
+
+def _ord(n: int) -> str:
+    return "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+
+def _open_day(days_ahead: int):
+    """A day `days_ahead` or more days from now that is not a Sunday."""
+    d = datetime.now(TZ).date() + timedelta(days=days_ahead)
+    return d if d.weekday() != 6 else d + timedelta(days=1)
+
+
 # name, what the patient wants (told to the simulator), expected outcome check
 def scenarios():
     tm = tomorrow()
@@ -159,6 +177,16 @@ def scenarios():
         "book_earliest": dict(
             want=f"You are a NEW patient who wants the very earliest opening tomorrow ({tm:%A}) for a checkup. Take whatever the earliest time is. Name: Omar Ali. The calling number is fine.",
             expect=dict(day=tm, hour=8, name="Omar")),
+        "book_weekday_and_date": dict(
+            want=f"You are a NEW patient who wants a cleaning on {_open_day(5):%A} the {_open_day(5).day}{_ord(_open_day(5).day)} "
+                 f"at 10 AM. Say it exactly that way in your first sentence. Name: Nora Diaz. The calling number is fine.",
+            expect=dict(day=_open_day(5), hour=10, name="Nora")),
+        "book_weekday_date_mismatch": dict(
+            want=f"You are a NEW patient who wants a cleaning. In your first sentence say you want it on "
+                 f"{_wrong_weekday(_open_day(6)):%A} the {_open_day(6).day}{_ord(_open_day(6).day)} at 10 AM (that weekday and that date do "
+                 f"not go together). When Mia tells you the two possible days, choose the {_wrong_weekday(_open_day(6)):%A}. "
+                 f"Name: Omar Haddad. The calling number is fine.",
+            expect=dict(day=_wrong_weekday(_open_day(6)), name="Omar")),
         "book_switch_day": dict(
             want=f"You are a NEW patient who first asks about tomorrow ({tm:%A}) at 9 AM for a cleaning. After Mia offers it, say actually you need Saturday instead, any morning time offered first. Name: Eve Rossi. The calling number is fine.",
             expect=dict(day=_next(5) if _next(5) > tm else _next(5, 1), name="Eve", morning=True)),
@@ -217,6 +245,7 @@ async def run_one(name: str, sc: dict) -> dict:
     log: list[str] = [f"MIA: {GREETING}"]
     problems, raw_broken, repaired = [], 0, 0
     guard = PromiseGuard()
+    dates = DateCheck(session)
     ended = False
 
     async def llm_turn(extra_system: str | None = None):
@@ -231,6 +260,10 @@ async def run_one(name: str, sc: dict) -> dict:
             break
         log.append(f"CALLER: {said}")
         heard.append(("patient", said))
+        date_note = dates.note_for(said)  # exact weekday/date for what the caller named, as in the pipeline
+        if date_note:
+            messages.extend(date_note.messages)
+            log.append("  [calendar note given to the model]")
         messages.append({"role": "user", "content": said})
         session.note_heard(said)
 

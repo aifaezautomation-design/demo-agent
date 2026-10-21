@@ -126,6 +126,9 @@ def resolve_day(text: str | None, today: date) -> tuple[date, bool]:
     weekday = next((_WEEKDAYS[w] for w in words if w in _WEEKDAYS), None)
     if "after next" in s and "week" in s:  # "the week after next [weekday]"
         return next_monday + timedelta(days=7 + (weekday or 0)), True
+    claim = date_claim(s, today) if weekday is not None else None
+    if claim and claim["by_number"] and not claim["mismatch"]:
+        return claim["by_number"], True  # "friday the 30th" is the 30th, not merely the coming Friday
     if weekday is not None:
         if "next" in words:
             return next_monday + timedelta(days=weekday), True
@@ -243,6 +246,87 @@ def date_conflict(text: str, slot: datetime) -> bool:
     return any(d != (slot.month, slot.day) for d in days) or any(w != slot.weekday() for w in weekdays)
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# Weekday vs date, checked in code. A caller says "Friday the 23rd"; whether the 23rd IS a Friday is calendar arithmetic,
+# which the model gets wrong (it told a caller that Friday, October 23 was a Sunday). So code works it out and either the
+# transcript note (app/date_check.py) or the tool result tells the model the exact weekday and date.
+_FULL_WEEKDAY = re.compile(r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", re.I)
+_NAMED_MONTH_DAY = re.compile(rf"\b({_MONTH_NAMES})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", re.I)
+_THE_ORDINAL = re.compile(r"\b(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)\b", re.I)
+_WEEKDAY_NUMBER = re.compile(
+    r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday),?\s+(?:the\s+)?(\d{1,2})\b(?!\s*(?:am|pm|a\.m|p\.m|:|o'?clock|\d))", re.I
+)
+
+
+def _day_of_month(text: str) -> tuple[int | None, int | None]:
+    """(month, day) a sentence names: 'October 23' -> (10, 23), 'the 23rd' -> (None, 23), nothing -> (None, None)."""
+    m = _NAMED_MONTH_DAY.search(text)
+    if m and 1 <= int(m.group(2)) <= 31:
+        return _MONTHS[m.group(1).lower()], int(m.group(2))
+    for pattern in (_THE_ORDINAL, _WEEKDAY_NUMBER):
+        m = pattern.search(text)
+        if m and 1 <= int(m.group(1)) <= 31:
+            return None, int(m.group(1))
+    return None, None
+
+
+def date_claim(text: str | None, today: date) -> dict | None:
+    """What a caller's words say about a day, with the calendar worked out.
+
+    Returns None when the text names no day of the month and no weekday. Otherwise a dict with:
+      weekday     the weekday number they named (0 = Monday) or None
+      by_number   the date for the day of the month they named (the next such date), or None
+      by_weekday  the coming date of the weekday they named, or None
+      mismatch    True when they named both and the date is not that weekday ("Monday the 23rd" when the 23rd is a Friday)
+    """
+    text = (text or "").replace(",", " ")
+    wd = _FULL_WEEKDAY.search(text)
+    weekday = _WEEKDAYS[wd.group(1).lower()] if wd else None
+    month, day = _day_of_month(text)
+    by_number = _add_months_day(today, day, month) if day else None
+    if weekday is None and by_number is None:
+        return None
+    by_weekday = today + timedelta(days=(weekday - today.weekday()) % 7) if weekday is not None else None
+    return {
+        "weekday": weekday, "by_number": by_number, "by_weekday": by_weekday,
+        "mismatch": bool(by_number is not None and weekday is not None and by_number.weekday() != weekday),
+    }
+
+
+def date_note(text: str | None, today: date) -> str | None:
+    """A note for the model about a day the caller just named, or None. Exact weekday and date, so it never works them out."""
+    claim = date_claim(text, today)
+    t = (text or "").lower()
+    next_wd = re.search(r"\bnext\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", t)
+    if next_wd and not (claim and claim["by_number"]):
+        this_day, _ = resolve_day(next_wd.group(1), today)
+        next_day, _ = resolve_day("next " + next_wd.group(1), today)
+        return (
+            f"SYSTEM NOTE (calendar, exact): \"this {next_wd.group(1).title()}\" is {spoken_day(this_day)}; \"next "
+            f"{next_wd.group(1).title()}\" means the {next_wd.group(1).title()} of next week, {spoken_day(next_day)}. "
+            "Say the exact date, and never work out weekdays or dates yourself."
+        )
+    if not claim or not claim["by_number"]:
+        return None
+    d = claim["by_number"]
+    if claim["mismatch"]:
+        wd_name = [k for k, v in _WEEKDAYS.items() if v == claim["weekday"] and len(k) > 4][0].title()
+        return (
+            f"SYSTEM NOTE (calendar, exact): the caller said a weekday and a date that do not go together. The {d.day}"
+            f"{_ordinal(d.day)} is {spoken_day(d)}, not a {wd_name}; the coming {wd_name} is {spoken_day(claim['by_weekday'])}. "
+            f"Kindly ask which they mean, naming both exactly ({spoken_day(d)} or {spoken_day(claim['by_weekday'])}). "
+            "Do not work out any dates yourself."
+        )
+    return (
+        f"SYSTEM NOTE (calendar, exact): the day the caller named is {spoken_day(d)}. That is correct; say it exactly like "
+        "that and never question the weekday or the date. Do not work out weekdays or dates yourself."
+    )
+
+
+def _ordinal(n: int) -> str:
+    return "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+
 def is_affirmative(heard: str) -> bool:
     return bool(_YES.search(heard)) and not _NO.search(heard.strip())
 
@@ -250,13 +334,25 @@ def is_affirmative(heard: str) -> bool:
 # Insults aimed at Mia. A patient who swears about pain, a tooth, a dentist or themselves ("this stupid tooth is killing
 # me", "the pain is shit", "I feel so dumb") must never be counted, or Mia could hang up on an emergency. So an insult
 # word counts only when it sits within a couple of words of a word that points at her, or is a direct attack by itself.
-_INSULT = r"(stupid|idiot|moron|useless|worthless|garbage|trash|pathetic|dumb|shit+y?|crap+y?|bitch|asshole|bastard|suck|sucks)"
+_INSULT = r"(stupid|idiot|moron|useless|worthless|garbage|trash|pathetic|dumb|shit+y?|crap+y?|bitch|asshole|bastard|suck|sucks|f(?:u+c+k+|\*{2,4})(?:ing|ed|er)?)"
 _AT_MIA = r"(you|you're|youre|your|ur|u|robot|bot|ai|mia|machine)"
 _GAP = r"(?:[\w']+[\s,]+){0,2}"
 _AIMED = re.compile(
     rf"(?<![\w'])(?:{_AT_MIA}[\s,]+{_GAP}{_INSULT}|{_INSULT}[\s,]+{_GAP}{_AT_MIA})(?![\w'])", re.I
 )
-_DIRECT = re.compile(r"(?<![\w'])(shut up|screw you|f+u+c+k+ (you|off|u)|go to hell|piece of shit,? you)", re.I)
+_DIRECT = re.compile(r"(?<![\w'])(shut up|screw you|f(?:u+c+k+|\*{2,4}) (you|off|u)|go to hell|piece of shit,? you)", re.I)
+# Swearing used as a compliment ("you're fucking amazing") is not an insult.
+_POSITIVE = re.compile(r"\b(amazing|awesome|great|cool|good|nice|impressive|incredible|love|wow|brilliant|fantastic|perfect|best|helpful|smart|rock|rocks|rule|rules|killing it|nailed it|legend)\b", re.I)
+# A caller asking not to be contacted again (demo line: the report email says OPT-OUT).
+_OPT_OUT = re.compile(
+    r"\b(stop (emailing|e-mailing|contacting|calling|sending|texting)|remove (me|us)|take (me|us) off|unsubscribe|"
+    r"not interested(?! in)|(don'?t|do not) (email|contact|call|text) (me|us)|leave (me|us) alone)\b",
+    re.I,
+)
+
+
+def is_opt_out(text: str) -> bool:
+    return bool(_OPT_OUT.search(text or ""))
 _THANKS = re.compile(r"(thank you|thanks to you|bless you|love you)", re.I)
 
 
@@ -264,6 +360,8 @@ def is_abusive(text: str) -> bool:
     """True when a sentence insults Mia herself. Sentences are judged one at a time."""
     for sentence in re.split(r"[.!?;]+", text):
         sentence = _THANKS.sub(" ", sentence).strip()
+        if _POSITIVE.search(sentence) and not _DIRECT.search(sentence):
+            continue
         if sentence and (_DIRECT.search(sentence) or _AIMED.search(" " + sentence + " ")):
             return True
     return False
@@ -315,6 +413,7 @@ class CallSession:
         self.writes = 0  # bookings, reschedules and cancellations really saved this call
         # Demo line only: the callback request the caller made, if any (see request_boltix_callback).
         self.callback: dict | None = None
+        self.opt_out = False  # demo line: the caller asked not to be contacted again
         self.abuse_strikes = 0  # caller messages that insulted Mia herself (demo line: the second one ends the call)
         self.emergency_seen = False  # an emergency/airway triage happened in this call: strikes stop and never end the call
         # (fetched_at, event_type_id, start, end, task) from prefetch_slots, or None.
@@ -558,6 +657,8 @@ class CallSession:
     def note_heard(self, text: str) -> None:
         self.heard.append(text)
         self.turn_searched = False  # a new caller turn: any availability claim now needs a fresh search
+        if self.tenant.demo_mode and is_opt_out(text):
+            self.opt_out = True
         if classify(text):  # an emergency or airway report: a patient in pain is never "rude", whatever they say
             self.emergency_seen = True
         elif not self.emergency_seen and is_abusive(text):
@@ -645,6 +746,15 @@ class CallSession:
         if is_emergency:
             return await self._emergency_slots(calcom, now)
 
+        claim = date_claim(date, now.date())
+        if claim and claim["mismatch"]:
+            d = claim["by_number"]
+            return {
+                "error": "weekday_date_mismatch",
+                "date_by_number": spoken_day(d), "date_by_weekday": spoken_day(claim["by_weekday"]),
+                "say": (f"The caller named a weekday and a date that do not go together: {spoken_day(d)} or "
+                        f"{spoken_day(claim['by_weekday'])}. Do not search yet. Kindly ask which they mean, naming both exactly."),
+            }
         day, understood = resolve_day(date, now.date())
         if not preferred_time:
             # The model sometimes searches the whole day and then tells the caller their time is unavailable. A time the

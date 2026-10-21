@@ -186,6 +186,7 @@ class DemoCallEmail:
     transcript: list[dict]
     call_id: str = ""
     lead: DemoLeadEmail | None = None
+    opt_out: bool = False  # the caller asked not to be emailed or called again
 
 
 def leads_recipient() -> str | None:
@@ -238,6 +239,7 @@ def render_demo_call(c: DemoCallEmail) -> tuple[str, str, str]:
         ("Caller", _phone(c.caller_phone) if c.caller_phone else "unknown"),
         ("Duration", f"{minutes}m {seconds:02d}s"),
         ("Callback requested", "YES" if c.callback_requested else "No"),
+        ("Asked not to be contacted", "YES (opt-out)" if c.opt_out else "No"),
         ("Summary", c.summary or "(no summary)"),
     ]
     if c.lead:
@@ -255,6 +257,8 @@ def render_demo_call(c: DemoCallEmail) -> tuple[str, str, str]:
     )
     who = _phone(c.caller_phone) if c.caller_phone else "unknown"
     subject = f"Demo call {who}: " + ("CALLBACK REQUESTED" if c.callback_requested else f"{minutes}m {seconds:02d}s")
+    if c.opt_out:
+        subject = "OPT-OUT: " + subject
     text = "\n".join(f"{k}: {v}" for k, v in rows) + "\n\nTranscript\n" + "\n".join(lines)
     return subject, _page("Demo call report", _table(rows), transcript_html), text
 
