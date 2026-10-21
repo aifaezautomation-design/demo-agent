@@ -12,7 +12,7 @@ CALLER: Who built you?
   [trimmed from the reply: 'How can I assist you today?']
 MIA: I was built by Boltix AI. I'm here to help with dental appointments and questions. 
 CALLER: What AI do you use?
-MIA: I run on Boltix AI's own voice platform. I'm designed specifically for the dental front desk.
+MIA: I'm built by Boltix AI, using trusted speech and AI technology. I'm designed specifically for the dental front desk.
 ```
 
 Mechanical checks: all clear
