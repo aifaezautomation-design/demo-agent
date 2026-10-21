@@ -48,4 +48,17 @@ DEMO_FACTS: dict[str, str] = {
         "reply to the email from Boltix AI, or book a call at boltix A I dot com, or I can take your details and "
         "have the Boltix AI team call you back"
     ),
+    "insurance_verification": (
+        "Mia tells callers which insurance the practice accepts; checking a patient's exact coverage is something the "
+        "Boltix AI team can go through on a call"
+    ),
+    "reminders": "the team can talk about that on a call",
+    "call_summaries": (
+        "every call is saved with a short summary for the practice team; the Boltix AI team can show you how on a call"
+    ),
+    "outages": "the Boltix AI team can walk you through how reliability is handled on a call",
+    "specialties": (
+        "Mia is built for dental practices; the Boltix AI team can talk about orthodontists or other specialties on a call"
+    ),
+    "clients": "the Boltix AI team can walk you through that on a call",
 }

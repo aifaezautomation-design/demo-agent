@@ -36,8 +36,7 @@ from app.prompts import build_system_prompt  # noqa: E402
 from app.tools import CallSession  # noqa: E402
 from app.trimmer import OfferPolicy  # noqa: E402
 
-DEMO_GREETING = ("Thanks for calling Apex Dental Care. This is Mia, an AI receptionist built by Boltix AI. "
-                 "Talk to me like a patient would, or ask me how I work. How can I help?")
+DEMO_GREETING = "Thanks for calling Apex Dental Care, this is Mia. How can I help you today?"  # what _greeting() says
 
 # name -> (scripted caller lines, optional goal for a simulated caller who continues afterwards)
 SCENARIOS: dict[str, tuple[list[str], str | None]] = {
@@ -63,6 +62,10 @@ SCENARIOS: dict[str, tuple[list[str], str | None]] = {
         "Is this a real practice?", "How many clients do you have?", "Are you better than the other AI receptionists out there?",
         "Can you transfer me to a person?", "Do you text patients?", "How long does setup take?", "Do we keep our number?",
         "Is this call recorded?", "Can you answer two calls at once?", "How do I get started?"], None),
+    "manager_extra": ([
+        "Can you verify a patient's insurance?", "Do you send appointment reminders?", "Can I see the call summaries somewhere?",
+        "What happens if your system goes down?", "How many minutes are included in the plan?",
+        "Can you work for an orthodontist too?"], None),
     "misc_manager": (["Do you speak Spanish?", "What if you make a mistake and double book someone?",
                       "Can we change your name and voice?", "Is there a contract?", "What happens after hours?"], None),
 }

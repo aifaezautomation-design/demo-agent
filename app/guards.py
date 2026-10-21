@@ -56,10 +56,15 @@ NOTES = {
 }
 
 
+def _plain(text: str) -> str:
+    """The model often writes curly apostrophes (I’ve, you’re); the patterns below use straight ones."""
+    return text.replace("’", "'").replace("‘", "'")
+
+
 def broke_promise(spoken: str, called_tool: bool, saved: bool = False) -> str | None:
     """'promise' when the model said it would check or book, or 'unsaved' when it said a booking was made, without calling a
     tool; None otherwise. A question to the caller is never a broken promise, since then the caller is the one expected to act."""
-    spoken = spoken.strip()
+    spoken = _plain(spoken).strip()
     if not spoken or called_tool or spoken.endswith("?"):
         return None
     if not saved:
@@ -72,7 +77,7 @@ def broke_promise(spoken: str, called_tool: bool, saved: bool = False) -> str | 
 
 
 def claimed_unavailable_unsearched(spoken: str, searched_this_turn: bool) -> bool:
-    return not searched_this_turn and bool(_UNAVAILABLE.search(spoken))
+    return not searched_this_turn and bool(_UNAVAILABLE.search(_plain(spoken)))
 
 
 class PromiseGuard:
@@ -83,7 +88,7 @@ class PromiseGuard:
         self.after_readback = False
 
     def check(self, spoken: str, called_tool: bool, writes: int, searched: bool = True, abuse: int = 0) -> str | None:
-        spoken = spoken.strip()
+        spoken = _plain(spoken).strip()
         pending, self.after_readback = self.after_readback, False
         if abuse >= 2 and not called_tool and spoken:
             return "goodbye"  # the call must end; the model is asked once per caller turn, like every other guard

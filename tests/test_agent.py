@@ -916,3 +916,28 @@ def test_booking_needs_the_number_question_and_never_books_a_garbled_caller_id(s
     garbled = ("Jane Wilson", "5155550199", "Cleaning", True, False, option["slot_id"])  # one digit off the caller ID
     assert run(session.book_appointment(*garbled))["status"] == "booked"
     assert session.calcom.bookings[-1][2] == "+15125550199"  # the caller ID, not the garbled digits
+
+
+def test_a_time_the_caller_names_is_always_searched_for(session):
+    """Found by conversation_eval: asked for 9 AM, Mia searched the whole day and said nine wasn't available."""
+    from app.tools import time_from_caller
+
+    assert time_from_caller("I'd like a cleaning tomorrow at 9 AM, if possible") == "9:00 am"
+    assert time_from_caller("how about 2:30 p.m.") == "2:30 pm"
+    assert time_from_caller("at 2") == "2:00 pm" and time_from_caller("at 10") == "10:00 am"
+    assert time_from_caller("October 21, not the 18th") is None and time_from_caller("my number is 512 555 0199") is None
+    day = session.tomorrow.date().isoformat()
+    session.note_heard("Can I come in tomorrow at 10 AM?")
+    result = run(session.check_availability(day, "morning"))  # the model forgot preferred_time
+    assert result["exact_match"] is True and result["options"][0]["spoken"].endswith("at 10 AM")
+    session.note_heard("What about afternoon?")  # no time named: nothing is forced
+    assert "exact_match" not in run(session.check_availability(day, "afternoon"))
+
+
+def test_guards_understand_curly_apostrophes():
+    """Found by conversation_eval: "I’ve got you scheduled" (curly) slipped past the unsaved-booking guard."""
+    from app.guards import PromiseGuard, broke_promise
+
+    assert broke_promise("Thank you, Ahmed! I’ve got you scheduled for Friday at noon.", False) == "unsaved"
+    assert broke_promise("I’ll check the calendar.", False) == "promise"
+    assert PromiseGuard().check("The three PM slot isn’t available.", False, 0, searched=False) == "unsearched"

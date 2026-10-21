@@ -131,12 +131,6 @@ def _turn_strategies() -> UserTurnStrategies | None:
 
 def _greeting(tenant: Tenant) -> str:
     disclosure = " This call may be recorded." if tenant.record_calls else ""
-    if tenant.demo_mode:
-        # Practice managers call the demo from an email: tell them up front what this is and what to try.
-        return (
-            f"Thanks for calling {tenant.name}. This is Mia, an AI receptionist built by Boltix AI.{disclosure} "
-            "Talk to me like a patient would, or ask me how I work. How can I help?"
-        )
     return f"Thanks for calling {tenant.name}, this is Mia.{disclosure} How can I help you today?"
 
 

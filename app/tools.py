@@ -157,6 +157,29 @@ def parse_time_pref(text: str | None) -> time | None:
     return time(hour, minute) if hour < 24 and minute < 60 else None
 
 
+_CALLER_TIME = re.compile(
+    r"(?<![\w:])(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)(?![\w])|(?<![\w:])at\s+(\d{1,2})(?::(\d{2}))?(?![\w:/])", re.I
+)
+
+
+def time_from_caller(text: str | None) -> str | None:
+    """A clock time the caller clearly named ('9 AM', '2:30 pm', 'at 9'), as text parse_time_pref reads; else None.
+    A bare 'at 9' is taken as business hours: 1-6 means afternoon, 7-11 morning, 12 noon."""
+    if not text:
+        return None
+    m = None
+    for m in _CALLER_TIME.finditer(text):
+        pass  # the last time mentioned is the one the caller means now
+    if not m:
+        return None
+    if m.group(3):
+        hour, minute, suffix = int(m.group(1)), m.group(2) or "00", m.group(3).replace(".", "").lower()
+    else:
+        hour, minute, suffix = int(m.group(4)), m.group(5) or "00", ""
+        suffix = "pm" if 1 <= hour <= 6 else "am"
+    return f"{hour}:{minute} {suffix}" if 1 <= hour <= 12 else None
+
+
 _DAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
@@ -604,6 +627,10 @@ class CallSession:
             return await self._emergency_slots(calcom, now)
 
         day, understood = resolve_day(date, now.date())
+        if not preferred_time:
+            # The model sometimes searches the whole day and then tells the caller their time is unavailable. A time the
+            # caller just named is always searched for.
+            preferred_time = time_from_caller(self.heard[-1] if self.heard else None)
         wanted = parse_time_pref(preferred_time)
 
         start = max(datetime.combine(day, time.min, self.tz), now + _MIN_LEAD_TIME)
