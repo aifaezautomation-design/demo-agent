@@ -114,6 +114,12 @@ class Report:
         return cond
 
 
+def caller_confirms(session) -> None:
+    """Reschedule and cancel now insist that Mia read the change back and the caller said yes, as on a real call."""
+    session.note_said("Just to confirm, that change to the appointment. Is that correct?")
+    session.note_heard("Yes, that's correct")
+
+
 def heading(n, title):
     print(f"\n{n}. {title}")
 
@@ -247,6 +253,7 @@ async def scripted_run(args) -> int:
         if not appt_id or len(options) < 2:
             r.skip("needs a booking and a second offered slot")
         else:
+            caller_confirms(session)
             result = await session.reschedule_appointment(appt_id, options[1]["slot_id"])
             await session.flush()  # the appointments row is updated just behind the reply
             if r.check(result.get("status") == "rescheduled", f"moved to {options[1]['spoken']}", str(result)):
@@ -259,6 +266,7 @@ async def scripted_run(args) -> int:
             r.skip("nothing booked")
         else:
             try:
+                caller_confirms(session)
                 result = await session.cancel_appointment(appt_id, "Simulation test cleanup")
                 await session.flush()
                 r.check(result.get("status") == "cancelled", "cancelled in Cal.com")
@@ -287,6 +295,7 @@ async def scripted_run(args) -> int:
                                    .eq("call_log_id", call_id).eq("is_emergency", True).execute()).data[0]
                             r.check(row["is_emergency"], "appointments row has is_emergency = true")
                             await session.find_appointments()  # tools only change looked-up appointments
+                            caller_confirms(session)
                             cancelled = await session.cancel_appointment(row["id"], "Simulation test cleanup")
                             r.check(cancelled.get("status") == "cancelled", "emergency booking cancelled again")
                 else:

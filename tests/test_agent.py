@@ -187,6 +187,7 @@ def test_cancel_requires_lookup_and_phone_verification(session):
     # Caller ID differs from the number on file, so last four digits are required.
     assert run(session.cancel_appointment("appt-1", "conflict"))["error"] == "verification_required"
     assert run(session.cancel_appointment("appt-1", "conflict", phone_last4="0000"))["error"] == "verification_required"
+    confirmed(session)
     assert run(session.cancel_appointment("appt-1", "conflict", phone_last4="0777"))["status"] == "cancelled"
     assert session.calcom.cancelled == ["uid-x"]
 
@@ -741,7 +742,9 @@ def test_cancel_and_reschedule_do_not_wait_for_the_database(session, monkeypatch
         await session.find_appointments()                       # one real read (300 ms)
         opts = (await session.check_availability(session.tomorrow.date().isoformat(), "any"))["options"]
         t0 = time.perf_counter()
+        confirmed(session)
         moved = await session.reschedule_appointment("appt-1", opts[1]["slot_id"])
+        confirmed(session)
         cancelled = await session.cancel_appointment("appt-1", "changed my mind")
         took = time.perf_counter() - t0
         await session.flush()
@@ -762,6 +765,7 @@ def test_a_cancelled_appointment_cannot_be_cancelled_twice_in_one_call(session):
 
     async def go():
         await session.find_appointments()
+        confirmed(session)
         first = await session.cancel_appointment("appt-1", "x")
         second = await session.cancel_appointment("appt-1", "x")
         await session.flush()
@@ -976,3 +980,63 @@ def test_never_book_a_slot_whose_date_differs_from_the_confirmed_date(session):
     session.note_heard("Yes, that's right")
     assert run(session.book_appointment(*args))["status"] == "booked"
     assert session.calcom.bookings[0][0].date() == slot.date()
+
+
+def _booked_appointment(session):
+    run(session.fake_db.insert_appointment({"patient_name": "Bob Smith", "patient_phone": "+15125550199", "cal_booking_uid": "uid-x",
+                                            "start_time": session.tomorrow.isoformat(), "visit_reason": "Crown"}))
+    run(session.find_appointments())
+
+
+def test_cancel_needs_a_readback_and_a_yes(session):
+    _booked_appointment(session)
+    assert run(session.cancel_appointment("appt-1", "x"))["error"] == "confirmation_required"  # nothing was said
+    session.note_said("Which appointment would you like to cancel?")
+    session.note_heard("The one tomorrow")
+    assert run(session.cancel_appointment("appt-1", "x"))["error"] == "confirmation_required"  # an answer is not a yes
+    session.note_said("So I'll cancel your crown appointment tomorrow at nine. Is that correct?")
+    session.note_heard("No, wait, keep it")
+    assert run(session.cancel_appointment("appt-1", "x"))["error"] == "confirmation_required"  # a no is not a yes
+    assert not session.calcom.cancelled
+    session.note_said("So I'll cancel your crown appointment tomorrow at nine. Is that correct?")
+    session.note_heard("Yes, please")
+    assert run(session.cancel_appointment("appt-1", "x"))["status"] == "cancelled" and session.calcom.cancelled == ["uid-x"]
+
+
+def test_reschedule_needs_a_readback_and_a_yes_and_the_right_date(session):
+    from app.tools import spoken_day
+
+    _booked_appointment(session)
+    option = run(session.check_availability(session.tomorrow.date().isoformat(), "any"))["options"][1]
+    slot = session.offered_slots[option["slot_id"]]
+    other = slot + timedelta(days=2)
+    assert run(session.reschedule_appointment("appt-1", option["slot_id"]))["error"] == "confirmation_required"
+    session.note_said("Which time works better?")
+    session.note_heard("The second one")
+    assert run(session.reschedule_appointment("appt-1", option["slot_id"]))["error"] == "confirmation_required"
+    # the read-back named another day than the slot
+    session.note_said(f"So I'll move it to {spoken_day(other.date())} at ten. Is that correct?")
+    session.note_heard("Yes")
+    assert run(session.reschedule_appointment("appt-1", option["slot_id"]))["error"] == "date_mismatch"
+    # the caller agrees but corrects the date
+    session.note_said(f"So I'll move it to {spoken_day(slot.date())} at ten. Is that correct?")
+    session.note_heard(f"Yes, but make it {other:%B} {other.day}")
+    assert run(session.reschedule_appointment("appt-1", option["slot_id"]))["error"] == "date_mismatch"
+    assert session.writes == 0
+    session.note_said(f"So I'll move it to {spoken_day(slot.date())} at ten. Is that correct?")
+    session.note_heard("Yes, that's right")
+    assert run(session.reschedule_appointment("appt-1", option["slot_id"]))["status"] == "rescheduled"
+
+
+def test_the_word_confirmations_is_not_a_readback():
+    """SMS confirmations are an add-on the demo mentions; that sentence must not make the next reply look like an unsaved booking."""
+    from app.guards import PromiseGuard
+    from app.tools import is_readback
+
+    line = "This demo doesn't send text messages, but SMS confirmations are an optional add-on. Would you like to know more?"
+    assert not is_readback(line)
+    assert PromiseGuard().check("The setup usually takes just a few days.", False, 0) is None
+    g = PromiseGuard()
+    g.check(line, False, 0)
+    assert g.check("The setup usually takes just a few days.", False, 0) is None
+    assert is_readback("So that's a cleaning on Friday at nine. Is that correct?") and is_readback("Just to confirm, nine AM Friday?")

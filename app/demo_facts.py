@@ -29,8 +29,8 @@ DEMO_FACTS: dict[str, str] = {
     ),
     "setup_time": "usually within a few days; the Boltix AI team confirms the timing for a practice on a call",
     "patient_texts": (
-        "no: Mia does not send text messages to patients; the practice gets an email with the patient's details "
-        "after every booking"
+        "this demo does not send text messages; for a practice, SMS confirmations are available as an optional add-on, "
+        "and the practice gets an email with the patient's details after every booking"
     ),
     "call_transfer": (
         "yes: for a practice, Mia can be set up to transfer calls to the front desk; in this demo there is no one "

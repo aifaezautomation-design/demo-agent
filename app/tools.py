@@ -212,7 +212,7 @@ def _digits(text: str) -> str:
     return "".join(ch for ch in text if ch.isdigit())
 
 
-_READBACK = re.compile(r"(confirm|correct|that right|sound(s)? (good|right)|does that work|shall i (book|schedule)|"
+_READBACK = re.compile(r"(\bconfirm\b|\bcorrect\b|that right|sound(s)? (good|right)|does that work|shall i (book|schedule)|"
                        r"should i (book|schedule)|would you like me to (book|schedule)|go ahead and book)", re.I)
 _YES = re.compile(r"\b(yes|yeah|yep|yup|yea|correct|right|sure|okay|ok|perfect|absolutely|definitely|please|"
                   r"go ahead|sounds good|that works|that's right|that is correct|uh-huh|mm-hmm)\b", re.I)
@@ -905,6 +905,15 @@ class CallSession:
         slot = self.offered_slots.get(slot_id)
         if slot is None:
             return {"error": "unknown_slot", "say": "Call check_availability and offer real options first."}
+        if not self._caller_confirmed():
+            return {"error": "confirmation_required", "say": (
+                "The caller has not confirmed yet. In one sentence read back the new day and time, then ask "
+                "\"Is that correct?\". Call reschedule_appointment only after they say yes.")}
+        if date_conflict(self.said[-1], slot) or date_conflict(self.heard[-1], slot):
+            return {"error": "date_mismatch", "say": (
+                f"The slot you chose is {spoken_time(slot)}, which is not the day the caller was told or just named. Do not move "
+                "the appointment. If the caller wants a different day, call check_availability for that day first and offer its "
+                "real times; otherwise read back exactly this day and time and ask \"Is that correct?\".")}
 
         async def write():
             booking = await calcom.reschedule_booking(appt["cal_booking_uid"], slot.astimezone(timezone.utc))
@@ -932,6 +941,10 @@ class CallSession:
         appt, error = await self._load_verified(appointment_id, phone_last4)
         if error:
             return error
+        if not self._caller_confirmed():
+            return {"error": "confirmation_required", "say": (
+                "The caller has not confirmed yet. In one sentence say which appointment (day and time) will be cancelled, then "
+                "ask \"Is that correct?\". Call cancel_appointment only after they say yes.")}
 
         async def write():
             await calcom.cancel_booking(appt["cal_booking_uid"], reason[:500] or "Cancelled by patient")
