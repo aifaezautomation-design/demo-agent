@@ -129,3 +129,20 @@ def test_hints_run_on_the_demo_line_only(monkeypatch):
     demo = _processors(monkeypatch, demo_mode=True)
     assert demo.index("EmergencyTriage") < demo.index("DemoHints") < demo.index("LLMUserAggregator")
     assert "DemoHints" not in _processors(monkeypatch, demo_mode=False)
+
+
+@pytest.mark.parametrize("text", ["How do I get started?", "How do I sign up?", "I'm interested.", "We're really interested", "What's the next step?"])
+def test_get_started_questions_get_the_full_next_step_note(text):
+    from app.demo_facts import DEMO_FACTS
+    from app.demo_hints import GET_STARTED_NOTE
+
+    assert hint_for(text) == "get_started"
+    assert DEMO_FACTS["next_step"] in GET_STARTED_NOTE and "ANSWER, not an offer" in GET_STARTED_NOTE
+
+
+@pytest.mark.parametrize("text,other", [
+    ("I'm interested, can someone call me?", None), ("We're not interested", "opt_out"),
+    ("How much does this cost? I'm interested", "price"), ("I'm interested, can you transfer me to a person?", "transfer"),
+])
+def test_get_started_does_not_hijack_other_questions(text, other):
+    assert hint_for(text) == other

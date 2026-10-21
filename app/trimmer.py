@@ -73,10 +73,20 @@ _NEEDED = re.compile(
 )
 
 
+# The answer to "how do I get started?" names the ways to do it. It is an answer, not an offer: never cut, never counted.
+_NEXT_STEP_ANSWER = re.compile(r"dot com|faez'?s email|reply to (faez|the email)|email from boltix", re.I)
+
+
+def is_next_step_answer(text: str) -> bool:
+    return bool(_NEXT_STEP_ANSWER.search(text.replace("’", "'")))
+
+
 def is_offer(text: str) -> bool:
     """True when a sentence is a closing offer: it offers something (a test booking, a call, more detail) rather than asking for
     what the conversation needs."""
     t = text.strip()
+    if is_next_step_answer(t):
+        return False
     if _TEST_WORDS.search(t) and _TEST_OFFER.match(t):
         return True
     if _NEEDED.search(t):
@@ -102,6 +112,7 @@ class OfferPolicy:
     def __init__(self):
         self.offers = 0  # closing offers kept so far in the call
         self._words = 0  # words kept so far in the reply being judged
+        self._next_step_reply = False  # this reply already named the ways to get started
         self._offered_this_reply = False
         self._offered_last_reply = False
 
@@ -117,6 +128,11 @@ class OfferPolicy:
             return True
         if _GENERIC.match(text):
             return False
+        if is_next_step_answer(text):
+            self._next_step_reply = True
+            return True  # the way to get started is the answer: kept, and not one of the offers
+        if self._next_step_reply and _QUESTION_OFFER.match(text) and re.search(r"details|call you|reach out", text, re.I):
+            return True  # "...or would you like me to take your details?" completing the same answer
         if is_offer(text):
             if (self._words + len(text.split()) > MAX_REPLY_WORDS  # a long answer loses its closing offer
                     or self._offered_last_reply  # never in two replies in a row
@@ -134,6 +150,7 @@ class OfferPolicy:
 
     def end_reply(self) -> None:
         self._words = 0
+        self._next_step_reply = False
         self._offered_last_reply, self._offered_this_reply = self._offered_this_reply, False
 
     def trim(self, reply: str) -> str:

@@ -79,6 +79,21 @@ CAPABILITIES_NOTE = (
     "every call day or night, and booking appointments) in one or two short sentences, then stop. Never read the whole list."
 )
 
+_GET_STARTED = re.compile(
+    r"\b(how (do|can|would|should) (i|we) (get started|start|sign up|begin|join|get going|move forward|proceed)|"
+    r"(get|getting) started|sign(ing)? up|(i'?m|i am|we'?re|we are)( very| really| quite)? interested|"
+    r"what('?s| is) the next step|next steps?|how (does|do) (it|this|we) (start|begin))\b",
+    re.I,
+)
+_WANTS_A_CALL = re.compile(r"\b(call (me|us)|give (me|us) a (call|ring)|call ?back|call back|someone call|have (someone|the team) call)\b", re.I)
+
+GET_STARTED_NOTE = (
+    "SYSTEM NOTE: the caller asks how to get started or sign up, or says they are interested. This is an ANSWER, not an offer: "
+    f"give the whole next step in one or two short sentences, keeping all three ways: \"You can {DEMO_FACTS['next_step']}.\" "
+    "Do not shorten it to only one way and do not turn it into a question. If they already asked for a call, skip the list and "
+    "start the callback flow instead (ask their name and practice)."
+)
+
 PRICE_NOTE = (
     "SYSTEM NOTE: if the caller's next message asks what you or the service cost (not the price of a dental "
     f"treatment), answer only from the Price of Mia fact: {DEMO_FACTS['pricing']}. Say no number and no dental prices. "
@@ -110,12 +125,14 @@ def hint_for(text: str) -> str | None:
         return "transfer"
     if _PRICE.search(t) and _PRODUCT.search(t) and not _DENTAL.search(t):
         return "price"
+    if _GET_STARTED.search(t) and not _WANTS_A_CALL.search(t):
+        return "get_started"
     return None
 
 
 NOTES = {
     "price": PRICE_NOTE, "transfer": TRANSFER_NOTE, "opt_out": OPT_OUT_NOTE, "faez": FAEZ_NOTE, "outreach": OUTREACH_NOTE,
-    "info_email": INFO_EMAIL_NOTE, "capabilities": CAPABILITIES_NOTE,
+    "info_email": INFO_EMAIL_NOTE, "capabilities": CAPABILITIES_NOTE, "get_started": GET_STARTED_NOTE,
 }
 
 

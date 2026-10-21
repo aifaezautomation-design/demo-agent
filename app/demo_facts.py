@@ -45,7 +45,7 @@ DEMO_FACTS: dict[str, str] = {
     ),
     "privacy": "the team walks you through how patient data is handled on a call",
     "next_step": (
-        "reply to the email from Boltix AI, or book a call at boltix A I dot com, or I can take your details and "
+        "reply to Faez's email, or book a call at boltix A I dot com, or I can take your details and "
         "have the Boltix AI team call you back"
     ),
     "insurance_verification": (

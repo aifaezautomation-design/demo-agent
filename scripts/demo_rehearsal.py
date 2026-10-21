@@ -84,6 +84,9 @@ SCENARIOS: dict[str, tuple[list[str], str | None]] = {
         "You are Jamie Rivera, owner of Rivera Dental. When Mia says you can reply to Faez's email, say that works, you will reply "
         "to his email, and thanks. Do not ask for a call. Then say goodbye.",
     ),
+    "get_started": (["How do I get started?"], None),
+    "interested": (["I'm interested."], None),
+    "sign_up": (["How do I sign up?"], None),
     "silent_after_greeting": ([], None),
     "recording": (["Are you recording this?"], None),
     "hello_hello": (["Hello? Hello? Can you hear me?"], None),
@@ -132,6 +135,7 @@ class Call:
         self.mia_lines = [self.greeting]
         self.ended = False
         self.guard_events = []
+        self.qa: list[tuple[str, str]] = []  # (what the caller said, everything Mia said in reply)
 
     def say(self, text: str, label: str = "MIA") -> None:
         self.log.append(f"{label}: {text}")
@@ -139,6 +143,11 @@ class Call:
         self.heard.append(("mia", text))
 
     async def caller(self, text: str) -> None:
+        before = len(self.mia_lines)
+        await self._caller(text)
+        self.qa.append((text, " ".join(self.mia_lines[before:])))
+
+    async def _caller(self, text: str) -> None:
         self.log.append(f"CALLER: {text}")
         self.heard.append(("patient", text))
         self.messages.append({"role": "user", "content": text})
@@ -331,6 +340,13 @@ def check(call: Call, name: str) -> list[str]:
             issues.append("no callback lead was saved for the info request")
         elif "email" not in (call.table.leads[0].get("notes") or "").lower():
             issues.append(f"notes do not say the caller wants info by email: {call.table.leads[0].get('notes')!r}")
+    for asked, answer in call.qa:
+        if re.search(r"get(ting)? started|sign(ing)? up|\binterested\b", asked, re.I) and not re.search(r"\bcall (me|us)\b", asked, re.I):
+            a = answer.lower().replace("’", "'")
+            if not re.search(r"dot com|faez'?s email|reply to|take your details|call you back|have the (boltix ai )?team call", a):
+                issues.append(f"the reply to {asked!r} gives no way to take the next step: {answer!r}")
+            elif len(re.findall(r"dot com|faez'?s email|take your details|call you back", a)) < 2:
+                issues.append(f"the reply to {asked!r} names only one way to get started: {answer!r}")
     if name == "recording" and not re.search(r"transcript|summary", joined):
         issues.append("recording answer did not mention the saved transcript and summary")
     if name == "silent_after_greeting":

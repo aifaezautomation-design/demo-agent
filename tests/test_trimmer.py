@@ -160,3 +160,25 @@ def test_a_flow_question_does_not_use_up_the_offers():
     p.trim("Sure. Can I take your name and practice?")
     p.trim("Thanks. Is the number you're calling from the best one to reach you?")
     assert p.trim("Okay. Would you like me to have them reach out?").endswith("reach out?")  # still the first offer
+
+
+def test_the_get_started_answer_is_never_cut_and_never_counted():
+    from app.demo_facts import DEMO_FACTS
+    from app.trimmer import is_next_step_answer, is_offer
+
+    answer = f"You can {DEMO_FACTS['next_step']}."
+    assert "Faez's email" in answer and "boltix A I dot com" in answer and "take your details" in answer
+    assert is_next_step_answer(answer) and not is_offer(answer)
+    p = OfferPolicy()
+    for _ in range(6):  # more often than the two-offer cap, and in consecutive replies
+        assert p.trim(answer) == answer
+    assert p.offers == 0
+    # the cap still applies to ordinary offers afterwards
+    offer = "Would you like to hear more?"
+    assert p.trim("Fine. " + offer).endswith(offer) and p.trim("Fine. " + offer) == "Fine. "
+    # a follow-up question completing the same answer is kept too
+    q = OfferPolicy()
+    out = q.trim("You can reply to Faez's email or book a call at boltix A I dot com. Would you like me to take your details?")
+    assert out.endswith("take your details?") and q.offers == 0
+    # the same question without the answer in front is an ordinary offer
+    assert is_offer("Would you like me to take your details?")
