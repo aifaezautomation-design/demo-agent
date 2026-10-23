@@ -146,3 +146,16 @@ def test_get_started_questions_get_the_full_next_step_note(text):
 ])
 def test_get_started_does_not_hijack_other_questions(text, other):
     assert hint_for(text) == other
+
+
+@pytest.mark.parametrize("text", [
+    "So I got an email from Fai. It's who is he?",  # the 2026-10-23 call, word for word
+    "who is faiz", "Who is Faiz?", "I got an email from fayez", "Who's Fez?", "There was an email from Faze", "Phase, the founder?",
+])
+def test_misheard_faez_gets_the_faez_note_when_the_sentence_is_about_him(text):
+    assert hint_for(text) == "faez"
+
+
+@pytest.mark.parametrize("text", ["What's the next phase of my treatment?", "I'm wearing a fez", "Phase two of my braces", "Faiz"])
+def test_misheard_faez_alone_is_not_enough(text):
+    assert hint_for(text) is None

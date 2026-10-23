@@ -150,13 +150,24 @@ class _SpokeTracker(FrameProcessor):
         self.writes = lambda: 0  # set by run_call: bookings, changes and cancellations really saved so far
         self.abuse = lambda: 0  # set by run_call: how many times the caller has insulted Mia (demo line only)
         self.on_said = None  # set by run_call: gets every spoken LLM reply the moment it ends
+        self.on_empty = None  # set by run_call: a response ended with no words and no tool call (OpenAI error, empty reply)
+        self.empty_handled = False  # the fallback line is spoken at most once per caller turn; reset() clears it
         self.last_activity = time.monotonic()
+
+    def reset(self) -> None:
+        """A new caller turn: the fallback line may be spoken again."""
+        self.empty_handled = False
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
+        self._track(frame)
+        await self.push_frame(frame, direction)
+
+    def _track(self, frame) -> None:
         if isinstance(frame, LLMFullResponseStartFrame):
+            # Not activity: Pipecat sends this before the OpenAI request, so a failed request (the 2026-10-23 call, out of
+            # credits) looked like a reply and the stall guard stayed quiet.
             self.spoke, self.called, self.text = False, False, ""
-            self.last_activity = time.monotonic()
         elif isinstance(frame, LLMTextFrame) and frame.text.strip():
             self.spoke = True
             self.text += frame.text
@@ -165,13 +176,16 @@ class _SpokeTracker(FrameProcessor):
             self.called = True
             self.last_activity = time.monotonic()
         elif isinstance(frame, LLMFullResponseEndFrame):
+            if not self.spoke and not self.called and self.on_empty and not self.empty_handled:
+                # Nothing said and nothing done (an OpenAI error, an empty reply): never leave the caller in silence.
+                self.empty_handled = True
+                asyncio.ensure_future(self.on_empty())
             if self.on_said and self.text.strip():
                 self.on_said(self.text.strip())
             kind = self.guard.check(self.text, self.called, self.writes(), self.searched_this_turn(), self.abuse())
             if kind and self.on_broken_promise and self.nudges < 1:
                 self.nudges += 1
                 asyncio.ensure_future(self.on_broken_promise(self.text.strip(), NOTES[kind]))
-        await self.push_frame(frame, direction)
 
 
 def _turn_strategies() -> UserTurnStrategies | None:
@@ -376,6 +390,17 @@ async def run_call(
         context.add_message({"role": "system", "content": note})
         await worker.queue_frame(LLMRunFrame())
 
+    user_speaking = False
+
+    async def say_fallback() -> None:
+        # The model gave nothing (no credits, an outage, an empty reply): a fixed line, spoken without the LLM.
+        if user_speaking or session.busy:
+            return
+        log.error("the model produced no reply: speaking the fallback line")
+        spoke.last_activity = time.monotonic()
+        await worker.queue_frame(TTSSpeakFrame(language_module.phrase("trouble", session.language_state.current)))
+
+    spoke.on_empty = say_fallback
     spoke.on_broken_promise = keep_promise
     spoke.searched_this_turn = lambda: session.turn_searched
     spoke.on_said = session.note_said
@@ -442,7 +467,9 @@ async def run_call(
 
     @aggregators.user().event_handler("on_user_turn_stopped")
     async def on_user_turn(_agg, _strategy, message):
-        nonlocal stall_watch
+        nonlocal stall_watch, user_speaking
+        user_speaking = False
+        spoke.reset()
         if message.content:
             log.info(f"patient: {message.content}")
             if stall_watch:
@@ -460,9 +487,11 @@ async def run_call(
 
     @aggregators.user().event_handler("on_user_turn_started")
     async def on_user_started(_agg, _strategy):
-        nonlocal idle_prompts, stall_watch
+        nonlocal idle_prompts, stall_watch, user_speaking
         idle_prompts = 0  # the caller is talking: the silence count starts over
+        user_speaking = True  # a reply cut off by the caller ends empty: no fallback line over them
         spoke.nudges = 0
+        spoke.reset()
         if stall_watch:
             stall_watch.cancel()
 

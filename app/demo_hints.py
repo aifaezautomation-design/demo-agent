@@ -43,6 +43,10 @@ _TRANSFER = re.compile(
 )
 
 _FAEZ = re.compile(r"\bfaez\b|\b(email|e-mail|message) from (boltix|boltics|bolt ?x)\b|\bgot (an|your) (email|e-mail)\b", re.I)
+# How speech-to-text mishears "Faez" ("Fai" on the 2026-10-23 call). These are ordinary words too ("phase", "fez"), so
+# they count only in a sentence that is about the email or the founder.
+_FAEZ_HEARD = re.compile(r"\b(faiz|fai|fayez|fez|faze|faise|phase|fies)\b", re.I)
+_FAEZ_CONTEXT = re.compile(r"\b(e-?mail\w*|founder|who('?s| is| was)|from)\b", re.I)
 _OUTREACH = re.compile(
     r"\b(did|has|have) (someone|somebody|anyone|you|boltix|faez)\b[^.?!]*\b(call|called|calling|contact|contacted|reach|reached)\b|"
     r"\bhow did you (get|find) (my|our|the) (e-?mail|number|name|info|information|address)\b|\bwhy (are you|did you) (calling|call|email)\w*\b",
@@ -115,7 +119,7 @@ def hint_for(text: str) -> str | None:
         return "opt_out"
     if _OUTREACH.search(t):
         return "outreach"
-    if _FAEZ.search(t):
+    if _FAEZ.search(t) or (_FAEZ_HEARD.search(t) and _FAEZ_CONTEXT.search(t)):
         return "faez"
     if _INFO_EMAIL.search(t) and not _PRICE.search(t):
         return "info_email"
